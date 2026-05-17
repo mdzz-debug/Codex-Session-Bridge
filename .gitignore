@@ -1,0 +1,7 @@
+csb-daemon
+node_modules/
+web/dist/
+dist/
+release/
+*.log
+.DS_Store

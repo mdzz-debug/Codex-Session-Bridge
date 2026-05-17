@@ -1,0 +1,76 @@
+{
+  "name": "codex-session-bridge",
+  "version": "1.0.0",
+  "description": "Desktop client and local daemon for remote Codex session control.",
+  "author": "Luohao",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite --host 127.0.0.1 --port 5178",
+    "dev:daemon": "go run ./cmd/csb-daemon --debug",
+    "dev:electron": "concurrently -k \"npm:dev:web\" \"wait-on http://127.0.0.1:5178 && electron .\"",
+    "build:web": "vite build",
+    "build:daemon": "go build -o dist/bin/csb-daemon ./cmd/csb-daemon",
+    "build:electron": "npm run build:web && npm run build:daemon && electron-builder",
+    "build:desktop": "bash scripts/build-desktop.sh",
+    "release:desktop": "bash scripts/release-desktop.sh",
+    "type-check": "tsc --noEmit",
+    "test:go": "go test ./...",
+    "check": "npm run type-check && npm run build:web && npm run test:go"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "lucide-react": "^0.561.0",
+    "vite": "^7.2.7",
+    "typescript": "^5.9.3",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^9.0.3"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "online.luohao.codex-session-bridge",
+    "productName": "Codex Session Bridge",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "web/dist/**/*",
+      "dist/bin/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/bin",
+        "to": "bin"
+      },
+      {
+        "from": "web/dist",
+        "to": "web/dist"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "web/public/logo.png",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "web/public/logo.png",
+      "target": [
+        "nsis"
+      ]
+    }
+  }
+}
