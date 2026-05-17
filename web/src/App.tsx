@@ -31,16 +31,19 @@ import {
 } from './services/bridgeApi';
 import {
   clearRelaySession,
+  readDesktopSection,
   readRelaySession,
   readSettings,
+  saveDesktopSection,
   saveRelaySession,
   saveSettings,
   type BridgeSettings,
   type RelaySession,
+  type SettingsSection,
   type ThemeName,
 } from './services/storage';
 
-type Section = 'general' | 'relay' | 'appearance' | 'about';
+type Section = SettingsSection;
 
 interface DesktopPreferences {
   available: boolean;
@@ -100,11 +103,12 @@ function App() {
   const [appInfo, setAppInfo] = useState<DesktopAppInfo | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [selectedFolder, setSelectedFolder] = useState('');
-  const [section, setSection] = useState<Section>('general');
+  const [section, setSection] = useState<Section>(() => readDesktopSection());
   const [loading, setLoading] = useState({ boot: true, desktop: false });
   const [error, setError] = useState('');
   const shellRef = useRef<HTMLDivElement | null>(null);
   const eventRef = useRef<WebSocket | null>(null);
+  const lastResizeHeightRef = useRef(0);
   const relayConnection = relayConnectionState(session, settings, relayRuntime);
 
   useEffect(() => {
@@ -129,6 +133,7 @@ function App() {
   }, [settings.daemonBase, settings.relayWssUrl, settings.autoConnectRelay, session?.token, session?.username]);
 
   useEffect(() => {
+    saveDesktopSection(section);
     if (section !== 'about' && section !== 'relay') return;
     void refreshRelayRuntime();
   }, [section]);
@@ -148,6 +153,9 @@ function App() {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         const height = shellRef.current?.scrollHeight || document.documentElement.scrollHeight;
+        const targetHeight = Math.max(360, Math.min(860, Math.ceil(height)));
+        if (Math.abs(targetHeight - lastResizeHeightRef.current) < 2) return;
+        lastResizeHeightRef.current = targetHeight;
         void window.bridgeDesktop?.resizeWindow(height);
       });
     };

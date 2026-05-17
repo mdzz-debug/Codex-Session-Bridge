@@ -419,13 +419,14 @@ func (s *Server) handleWebApp(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	root := filepath.Join("web", "dist")
-	path := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-	if path == "." || path == "" {
-		path = "index.html"
+	root := webDistRoot()
+	requestPath := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+	if requestPath == "." || requestPath == "" {
+		requestPath = "index.html"
 	}
-	full := filepath.Join(root, path)
-	if !strings.HasPrefix(full, root) {
+	full := filepath.Join(root, requestPath)
+	rel, err := filepath.Rel(root, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		http.NotFound(w, r)
 		return
 	}
@@ -444,6 +445,41 @@ func (s *Server) handleWebApp(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 	}
 	_, _ = w.Write(data)
+}
+
+func webDistRoot() string {
+	candidates := []string{}
+	if envRoot := strings.TrimSpace(os.Getenv("CSB_WEB_DIST")); envRoot != "" {
+		candidates = append(candidates, envRoot)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "web", "dist"))
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "web", "dist"),
+			filepath.Join(exeDir, "..", "web", "dist"),
+			filepath.Join(exeDir, "..", "..", "web", "dist"),
+		)
+	}
+	candidates = append(candidates, filepath.Join("web", "dist"))
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(filepath.Join(candidate, "index.html")); err == nil && !info.IsDir() {
+			if abs, err := filepath.Abs(candidate); err == nil {
+				return abs
+			}
+			return filepath.Clean(candidate)
+		}
+	}
+	if len(candidates) > 0 {
+		if abs, err := filepath.Abs(candidates[0]); err == nil {
+			return abs
+		}
+		return filepath.Clean(candidates[0])
+	}
+	return filepath.Join("web", "dist")
 }
 
 func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.Reader, error) {

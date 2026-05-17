@@ -1,4 +1,5 @@
 export type ThemeName = 'system' | 'light' | 'dark';
+export type SettingsSection = 'general' | 'relay' | 'appearance' | 'about';
 
 export interface BridgeSettings {
   daemonBase: string;
@@ -18,6 +19,7 @@ export interface RelaySession {
 
 const SETTINGS_KEY = 'csb.settings.v1';
 const SESSION_KEY = 'csb.relay.session.v1';
+const SECTION_KEY = 'csb.desktop.section.v1';
 
 export const defaultSettings: BridgeSettings = {
   daemonBase: '',
@@ -75,4 +77,17 @@ export function saveRelaySession(session: RelaySession, persistent: boolean) {
 export function clearRelaySession() {
   localStorage.removeItem(SESSION_KEY);
   sessionStorage.removeItem(SESSION_KEY);
+}
+
+export function readDesktopSection(): SettingsSection {
+  try {
+    const value = localStorage.getItem(SECTION_KEY);
+    return value === 'relay' || value === 'appearance' || value === 'about' ? value : 'general';
+  } catch {
+    return 'general';
+  }
+}
+
+export function saveDesktopSection(section: SettingsSection) {
+  localStorage.setItem(SECTION_KEY, section);
 }

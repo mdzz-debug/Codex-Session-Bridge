@@ -102,6 +102,9 @@ function daemonCommand() {
   const env = {
     ...process.env,
     PATH: mergePath(process.env.PATH, commonShellPath),
+    CSB_WEB_DIST: app.isPackaged
+      ? path.join(process.resourcesPath, 'web', 'dist')
+      : path.join(app.getAppPath(), 'web', 'dist'),
   };
 
   if (!app.isPackaged) {
@@ -306,20 +309,35 @@ function loadingHTML(message = '正在启动本地监听服务') {
 
 function loadLoadingPage(message) {
   if (!mainWindow) return;
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHTML(message))}`);
+  loadURLIfChanged(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHTML(message))}`);
+}
+
+function loadURLIfChanged(url) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const currentURL = mainWindow.webContents.getURL();
+  if (currentURL && normalizeWindowURL(currentURL) === normalizeWindowURL(url)) return;
+  mainWindow.loadURL(url);
+}
+
+function normalizeWindowURL(value) {
+  try {
+    return new URL(value).toString();
+  } catch {
+    return String(value || '');
+  }
 }
 
 function loadAppWhenDaemonReady() {
   if (!mainWindow) return;
   if (!app.isPackaged) {
-    mainWindow.loadURL(devUrl);
+    loadURLIfChanged(devUrl);
     return;
   }
   clearTimeout(daemonLoadTimer);
   waitForDaemon(180000)
     .then(() => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
-      mainWindow.loadURL(daemonUrl());
+      loadURLIfChanged(daemonUrl());
     })
     .catch((error) => {
       console.error(error);
@@ -545,7 +563,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('desktop:resize-window', (_event, height) => {
     if (!mainWindow || !Number.isFinite(height)) return false;
     const targetHeight = Math.max(360, Math.min(860, Math.ceil(height)));
-    const [width] = mainWindow.getContentSize();
+    const [width, currentHeight] = mainWindow.getContentSize();
+    if (Math.abs(currentHeight - targetHeight) < 2) return true;
     mainWindow.setContentSize(width, targetHeight, true);
     return true;
   });
