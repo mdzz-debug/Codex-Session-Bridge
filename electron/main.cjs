@@ -436,7 +436,18 @@ function fetchJson(url) {
       res.on('data', (chunk) => { body += chunk; });
       res.on('end', () => {
         if ((res.statusCode || 0) >= 400) {
-          reject(new Error(`GitHub 返回 ${res.statusCode || '错误状态'}`));
+          let message = `GitHub 返回 ${res.statusCode || '错误状态'}`;
+          try {
+            const data = JSON.parse(body);
+            if (typeof data.message === 'string' && data.message.toLowerCase().includes('rate limit')) {
+              message = 'GitHub API 限流，请稍后再试';
+            }
+          } catch {
+            // Keep the HTTP status message.
+          }
+          const error = new Error(message);
+          error.statusCode = res.statusCode;
+          reject(error);
           return;
         }
         try {
@@ -464,12 +475,14 @@ async function checkGithubUpdates() {
       releaseUrl,
     };
   } catch (error) {
+    const isRateLimited = error?.statusCode === 403 || String(error?.message || '').includes('限流');
     return {
       currentVersion,
       latestVersion: currentVersion,
       updateAvailable: false,
       releaseUrl: githubReleasesUrl,
-      error: error instanceof Error ? error.message : '检查更新失败',
+      error: isRateLimited ? '' : error instanceof Error ? error.message : '检查更新失败',
+      message: isRateLimited ? 'GitHub API 限流，可打开 Releases 页面查看' : undefined,
     };
   }
 }

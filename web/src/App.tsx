@@ -72,6 +72,7 @@ interface UpdateInfo {
   updateAvailable: boolean;
   releaseUrl: string;
   error?: string;
+  message?: string;
 }
 
 const fallbackDesktopPrefs: DesktopPreferences = {
@@ -317,7 +318,7 @@ function App() {
     try {
       const next = await window.bridgeDesktop.checkUpdates();
       setUpdateInfo(next);
-      setError(next.error || '');
+      setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : '检查更新失败');
     } finally {
@@ -538,7 +539,7 @@ function App() {
                       ? updateInfo.error
                       : updateInfo.updateAvailable
                         ? `发现 ${updateInfo.latestVersion}`
-                        : `已是最新 ${updateInfo.currentVersion}`}
+                        : updateInfo.message || `已是最新 ${updateInfo.currentVersion}`}
                   </span>
                 )}
                 {updateInfo?.releaseUrl && (

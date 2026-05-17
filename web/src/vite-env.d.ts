@@ -30,6 +30,7 @@ interface BridgeDesktopUpdateInfo {
   updateAvailable: boolean;
   releaseUrl: string;
   error?: string;
+  message?: string;
 }
 
 interface Window {
