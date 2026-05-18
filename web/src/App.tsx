@@ -5,12 +5,12 @@ import {
   Circle,
   Download,
   FolderOpen,
+  KeyRound,
   Laptop,
   Loader2,
   LogIn,
   LogOut,
   Moon,
-  Palette,
   RefreshCw,
   Router,
   Settings2,
@@ -25,6 +25,8 @@ import {
   loginRelay,
   relayStatusText,
   type BridgeEvent,
+  type CodexConfig,
+  type CodexProjectConfig,
   type DeviceInfo,
   type HealthInfo,
   type RelayRuntimeStatus,
@@ -91,6 +93,11 @@ const fallbackDesktopPrefs: DesktopPreferences = {
 
 function App() {
   const [settings, setSettings] = useState<BridgeSettings>(() => readSettings());
+  const [relayDraft, setRelayDraft] = useState(() => ({
+    relayApiBase: settings.relayApiBase,
+    relayWssUrl: settings.relayWssUrl,
+    autoConnectRelay: settings.autoConnectRelay,
+  }));
   const [session, setSession] = useState<RelaySession | null>(() => readRelaySession());
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [device, setDevice] = useState<DeviceInfo | null>(null);
@@ -102,19 +109,33 @@ function App() {
   const [daemonPortDraft, setDaemonPortDraft] = useState(fallbackDesktopPrefs.daemonPort);
   const [appInfo, setAppInfo] = useState<DesktopAppInfo | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [codexConfig, setCodexConfig] = useState<CodexConfig | null>(null);
+  const [codexDraft, setCodexDraft] = useState<CodexConfig | null>(null);
   const [selectedFolder, setSelectedFolder] = useState('');
   const [section, setSection] = useState<Section>(() => readDesktopSection());
   const [loading, setLoading] = useState({ boot: true, desktop: false });
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLElement | null>(null);
+  const mainRef = useRef<HTMLElement | null>(null);
   const eventRef = useRef<WebSocket | null>(null);
   const lastResizeHeightRef = useRef(0);
+  const generalHeightRef = useRef(0);
   const relayConnection = relayConnectionState(session, settings, relayRuntime);
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme;
     saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    setRelayDraft({
+      relayApiBase: settings.relayApiBase,
+      relayWssUrl: settings.relayWssUrl,
+      autoConnectRelay: settings.autoConnectRelay,
+    });
+  }, [settings.relayApiBase, settings.relayWssUrl, settings.autoConnectRelay]);
 
   useEffect(() => {
     void bootstrap();
@@ -134,8 +155,8 @@ function App() {
 
   useEffect(() => {
     saveDesktopSection(section);
-    if (section !== 'about' && section !== 'relay') return;
-    void refreshRelayRuntime();
+    if (section === 'about' || section === 'relay') void refreshRelayRuntime();
+    if (section === 'codex') void loadCodexConfig();
   }, [section]);
 
   useEffect(() => {
@@ -147,12 +168,23 @@ function App() {
   }, [settings.daemonBase, settings.autoConnectRelay, session?.token]);
 
   useEffect(() => {
-    if (!window.bridgeDesktop?.resizeWindow || !shellRef.current) return;
+    if (!window.bridgeDesktop?.resizeWindow || !shellRef.current || !mainRef.current) return;
     let frame = 0;
     const resize = () => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        const height = shellRef.current?.scrollHeight || document.documentElement.scrollHeight;
+        const headerHeight = headerRef.current?.offsetHeight || 0;
+        const main = mainRef.current;
+        const mainHeight = main ? Math.max(main.scrollHeight, main.offsetHeight) : 0;
+        const contentHeight = headerHeight + mainHeight;
+        if (section === 'general') {
+          generalHeightRef.current = Math.ceil(contentHeight);
+        }
+        const generalHeight = generalHeightRef.current;
+        const height =
+          section === 'codex'
+            ? generalHeight || Math.min(contentHeight, 620)
+            : Math.max(contentHeight, generalHeight);
         const targetHeight = Math.max(360, Math.min(860, Math.ceil(height)));
         if (Math.abs(targetHeight - lastResizeHeightRef.current) < 2) return;
         lastResizeHeightRef.current = targetHeight;
@@ -162,6 +194,7 @@ function App() {
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(shellRef.current);
+    observer.observe(mainRef.current);
     return () => {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
@@ -169,6 +202,7 @@ function App() {
   }, [
     section,
     error,
+    notice,
     loading.boot,
     loading.desktop,
     session?.username,
@@ -177,6 +211,8 @@ function App() {
     desktopPrefs.hideDockIcon,
     daemonPortDraft,
     updateInfo?.latestVersion,
+    codexDraft?.path,
+    codexDraft?.projects.length,
     selectedFolder,
   ]);
 
@@ -351,8 +387,117 @@ function App() {
     }
   }
 
+  async function loadCodexConfig() {
+    try {
+      const next = await bridgeApi.codexConfig(settings);
+      setCodexConfig(next);
+      setCodexDraft(next);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '读取 Codex 配置失败');
+    }
+  }
+
+  async function saveCodexConfig() {
+    if (!codexDraft) return;
+    setLoading((current) => ({ ...current, desktop: true }));
+    try {
+      const next = await bridgeApi.updateCodexConfig(settings, normalizeCodexConfigDraft(codexDraft));
+      setCodexConfig(next);
+      setCodexDraft(next);
+      const restartMessages: string[] = [];
+      try {
+        const cliRestart = await bridgeApi.restartCodex(settings);
+        restartMessages.push(cliRestart.restarted ? 'Codex CLI 已重启' : 'Codex CLI 未运行，未启动');
+      } catch (restartErr) {
+        restartMessages.push(restartErr instanceof Error ? `Codex CLI 重启失败：${restartErr.message}` : 'Codex CLI 重启失败');
+      }
+      try {
+        const desktopRestart = await window.bridgeDesktop?.restartCodexDesktopIfRunning?.();
+        if (desktopRestart?.restarted) {
+          restartMessages.push('Codex 桌面端已重启');
+        } else if (desktopRestart?.wasRunning) {
+          restartMessages.push(desktopRestart.error ? `Codex 桌面端重启失败：${desktopRestart.error}` : 'Codex 桌面端未重启');
+        } else {
+          restartMessages.push('Codex 桌面端未运行，未启动');
+        }
+      } catch (restartErr) {
+        restartMessages.push(restartErr instanceof Error ? `Codex 桌面端检测失败：${restartErr.message}` : 'Codex 桌面端检测失败');
+      }
+      setError('');
+      setNotice(`配置保存成功。${restartMessages.join('；')}。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存 Codex 配置失败');
+      setNotice('');
+    } finally {
+      setLoading((current) => ({ ...current, desktop: false }));
+    }
+  }
+
+  function updateCodexDraft(patch: Partial<CodexConfig>) {
+    setNotice('');
+    setCodexDraft((current) => (current ? { ...current, ...patch } : current));
+  }
+
+  function updateCodexProject(index: number, patch: Partial<CodexProjectConfig>) {
+    setNotice('');
+    setCodexDraft((current) => {
+      if (!current) return current;
+      const projects = current.projects.map((project, projectIndex) => (projectIndex === index ? { ...project, ...patch } : project));
+      return { ...current, projects };
+    });
+  }
+
+  function removeCodexProject(index: number) {
+    setNotice('');
+    setCodexDraft((current) => {
+      if (!current) return current;
+      return { ...current, projects: current.projects.filter((_, projectIndex) => projectIndex !== index) };
+    });
+  }
+
+  async function addCodexProject() {
+    try {
+      const result = await window.bridgeDesktop?.chooseProjectFolder?.();
+      if (!result?.path) return;
+      setNotice('');
+      setCodexDraft((current) => {
+        if (!current) return current;
+        if (current.projects.some((project) => project.path === result.path)) return current;
+        return { ...current, projects: [...current.projects, { path: result.path, trust_level: 'trusted' }] };
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法选择项目文件夹');
+    }
+  }
+
   function updateSettings(patch: Partial<BridgeSettings>) {
     setSettings((current) => ({ ...current, ...patch }));
+  }
+
+  function updateRelayApiBaseDraft(value: string) {
+    setRelayDraft((current) => {
+      const currentDerivedWss = relayWssFromApiBase(current.relayApiBase);
+      const nextDerivedWss = relayWssFromApiBase(value);
+      return {
+        ...current,
+        relayApiBase: value,
+        relayWssUrl: !current.relayWssUrl.trim() || current.relayWssUrl.trim() === currentDerivedWss ? nextDerivedWss : current.relayWssUrl,
+      };
+    });
+  }
+
+  function saveRelayConfig() {
+    const relayApiBase = normalizeRelayApiBase(relayDraft.relayApiBase);
+    const relayWssUrl = relayDraft.relayWssUrl.trim() || relayWssFromApiBase(relayApiBase);
+    setSettings((current) => ({
+      ...current,
+      relayApiBase,
+      relayWssUrl,
+      autoConnectRelay: relayDraft.autoConnectRelay,
+    }));
+    setError('');
+    setNotice('中转站连接配置已保存。');
   }
 
   function connectEvents() {
@@ -377,7 +522,7 @@ function App() {
 
   return (
     <div className="settings-shell" ref={shellRef}>
-      <header className="app-toolbar">
+      <header className="app-toolbar" ref={headerRef}>
         <div className="title-row">
           <div className="window-spacer" />
           <div className="title-lockup">
@@ -395,16 +540,22 @@ function App() {
         <nav className="settings-tabs" aria-label="设置">
           <NavButton icon={<Settings2 size={26} />} label="通用" active={section === 'general'} onClick={() => setSection('general')} />
           <NavButton icon={<Router size={26} />} label="中转站" active={section === 'relay'} onClick={() => setSection('relay')} />
-          <NavButton icon={<Palette size={26} />} label="外观" active={section === 'appearance'} onClick={() => setSection('appearance')} />
+          <NavButton icon={<KeyRound size={26} />} label="Codex" active={section === 'codex'} onClick={() => setSection('codex')} />
           <NavButton icon={<Shield size={26} />} label="关于" active={section === 'about'} onClick={() => setSection('about')} />
         </nav>
       </header>
 
-      <main className="settings-main">
+      <main className={`settings-main ${section === 'codex' ? 'scrollable' : ''}`} ref={mainRef}>
         {error && (
           <div className="alert">
             <AlertCircle size={17} />
             {error}
+          </div>
+        )}
+        {notice && !error && (
+          <div className="alert success">
+            <CheckCircle2 size={17} />
+            {notice}
           </div>
         )}
 
@@ -483,34 +634,210 @@ function App() {
             <RelayLoginCard
               settings={settings}
               session={session}
+              onApiBaseChange={updateRelayApiBaseDraft}
               onSettings={setSettings}
-              onLogin={(nextSession, persistent) => {
-                saveRelaySession(nextSession, persistent);
+              onLogin={(nextSession) => {
+                saveRelaySession(nextSession, true);
                 setSession(nextSession);
-                setSettings((current) => ({ ...current, relayApiBase: nextSession.apiBase }));
+                setSettings((current) => {
+                  const currentDerivedWss = relayWssFromApiBase(current.relayApiBase);
+                  const nextDerivedWss = relayWssFromApiBase(nextSession.apiBase);
+                  return {
+                    ...current,
+                    relayApiBase: nextSession.apiBase,
+                    relayWssUrl: !current.relayWssUrl.trim() || current.relayWssUrl.trim() === currentDerivedWss ? nextDerivedWss : current.relayWssUrl,
+                  };
+                });
+                setNotice('中转站账号已保存。');
               }}
               onLogout={() => {
                 clearRelaySession();
                 setSession(null);
+                setNotice('');
               }}
             />
 
             <Card title="连接配置" subtitle="WSS 是 agent 主动连出去的外网地址，不需要把本机端口暴露到公网。">
               <label className="field">
+                <span>中转站 API Base</span>
+                <input value={relayDraft.relayApiBase} onChange={(event) => updateRelayApiBaseDraft(event.target.value)} placeholder="https://<your-relay-host>" />
+              </label>
+              <label className="field">
                 <span>中转站 WSS 地址</span>
-                <input value={settings.relayWssUrl} onChange={(event) => updateSettings({ relayWssUrl: event.target.value })} />
+                <input value={relayDraft.relayWssUrl} onChange={(event) => setRelayDraft((current) => ({ ...current, relayWssUrl: event.target.value }))} placeholder="wss://<your-relay-host>/agent" />
               </label>
               <ToggleRow
                 title="启动后自动连接中转站 WSS"
                 detail={relayStatusText(session, settings, relayRuntime)}
-                checked={settings.autoConnectRelay}
-                onChange={(checked) => updateSettings({ autoConnectRelay: checked })}
+                checked={relayDraft.autoConnectRelay}
+                onChange={(checked) => setRelayDraft((current) => ({ ...current, autoConnectRelay: checked }))}
               />
+              <div className="update-row">
+                <span>{relayConfigChanged(settings, relayDraft) ? '有未保存的连接配置' : '连接配置已保存'}</span>
+                <button className="primary icon-text" type="button" disabled={!relayConfigChanged(settings, relayDraft)} onClick={saveRelayConfig}>
+                  <CheckCircle2 size={15} />
+                  保存链接配置
+                </button>
+              </div>
             </Card>
           </SettingsStack>
         )}
 
-        {section === 'appearance' && (
+        {section === 'codex' && (
+          <SettingsStack>
+            {!codexDraft ? (
+              <Card title="Codex 配置" subtitle="读取本机 Codex 配置文件，按平台自动定位。">
+                <button className="icon-text" type="button" onClick={() => void loadCodexConfig()}>
+                  <RefreshCw size={15} />
+                  读取配置
+                </button>
+              </Card>
+            ) : (
+              <>
+                <Card title="配置位置" subtitle={codexDraft.exists ? '已读取本机 config.toml。' : '未找到配置文件，保存后会创建。'}>
+                  <StatusGrid compact>
+                    <Metric icon={<FolderOpen size={17} />} label={codexDraft.platform === 'windows' ? 'Windows 路径' : 'macOS 路径'} value={codexDraft.exists ? '已找到' : '待创建'} detail={codexDraft.path} />
+                    <Metric icon={<Cpu size={17} />} label="CODEX_HOME" value={codexDraft.codex_home ? '已定位' : '默认'} detail={codexDraft.codex_home || '~/.codex'} />
+                  </StatusGrid>
+                </Card>
+
+                <Card title="模型服务" subtitle="只编辑常用模型和 provider 字段，认证信息仍留在 Codex 自己的 auth 文件中。">
+                  <div className="config-grid">
+                    <label className="field">
+                      <span>模型</span>
+                      <input value={codexDraft.model} onChange={(event) => updateCodexDraft({ model: event.target.value })} placeholder="gpt-5.2" />
+                    </label>
+                    <label className="field">
+                      <span>模型服务</span>
+                      <input value={codexDraft.model_provider} onChange={(event) => updateCodexDraft({ model_provider: event.target.value })} placeholder="codex" />
+                    </label>
+                  </div>
+                  <label className="field">
+                    <span>接口地址</span>
+                    <input value={codexDraft.base_url} onChange={(event) => updateCodexDraft({ base_url: event.target.value })} placeholder="https://api.openai.com/v1" />
+                  </label>
+                  <div className="config-grid">
+                    <label className="field">
+                      <span>服务名称</span>
+                      <input value={codexDraft.provider_name} onChange={(event) => updateCodexDraft({ provider_name: event.target.value })} placeholder="OpenAI" />
+                    </label>
+                    <label className="field">
+                      <span>接口协议</span>
+                      <select value={codexDraft.wire_api} onChange={(event) => updateCodexDraft({ wire_api: event.target.value })}>
+                        <option value="">默认</option>
+                        <option value="responses">Responses API</option>
+                        <option value="chat">Chat Completions</option>
+                      </select>
+                    </label>
+                  </div>
+                  <ToggleRow
+                    title="使用 OpenAI 登录鉴权"
+                    detail="写入 provider 的 requires_openai_auth。"
+                    checked={codexDraft.requires_openai_auth}
+                    onChange={(checked) => updateCodexDraft({ requires_openai_auth: checked })}
+                  />
+                </Card>
+
+                <Card title="运行与持久化" subtitle="控制推理强度、历史持久化和响应内容存储。">
+                  <div className="config-grid">
+                    <label className="field">
+                      <span>推理强度</span>
+                      <select value={codexDraft.model_reasoning_effort} onChange={(event) => updateCodexDraft({ model_reasoning_effort: event.target.value })}>
+                        <option value="">默认</option>
+                        <option value="minimal">极低</option>
+                        <option value="low">低</option>
+                        <option value="medium">中</option>
+                        <option value="high">高</option>
+                        <option value="xhigh">极高</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>历史记录</span>
+                      <select value={codexDraft.history_persistence} onChange={(event) => updateCodexDraft({ history_persistence: event.target.value })}>
+                        <option value="">默认</option>
+                        <option value="save-all">保存全部</option>
+                        <option value="none">不保存</option>
+                      </select>
+                    </label>
+                  </div>
+                  <ToggleRow
+                    title="禁用响应内容存储"
+                    detail="写入 disable_response_storage，用于减少本机保留的响应内容。"
+                    checked={codexDraft.disable_response_storage}
+                    onChange={(checked) => updateCodexDraft({ disable_response_storage: checked })}
+                  />
+                  <ToggleRow
+                    title="启用 Web Search"
+                    detail="写入 web_search。"
+                    checked={codexDraft.web_search}
+                    onChange={(checked) => updateCodexDraft({ web_search: checked })}
+                  />
+                </Card>
+
+                <Card title="权限" subtitle="配置 Codex 的审批策略、沙箱模式和 workspace-write 网络权限。">
+                  <div className="config-grid">
+                    <label className="field">
+                      <span>审批策略</span>
+                      <select value={codexDraft.approval_policy} onChange={(event) => updateCodexDraft({ approval_policy: event.target.value })}>
+                        <option value="">默认</option>
+                        <option value="never">永不询问</option>
+                        <option value="on-request">按需询问</option>
+                        <option value="on-failure">失败时询问</option>
+                        <option value="untrusted">不受信任</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>沙箱模式</span>
+                      <select value={codexDraft.sandbox_mode} onChange={(event) => updateCodexDraft({ sandbox_mode: event.target.value })}>
+                        <option value="">默认</option>
+                        <option value="read-only">只读</option>
+                        <option value="workspace-write">允许写入工作区</option>
+                        <option value="danger-full-access">完全访问</option>
+                      </select>
+                    </label>
+                  </div>
+                  <ToggleRow
+                    title="workspace-write 允许网络"
+                    detail="写入 sandbox_workspace_write.network_access。"
+                    checked={codexDraft.network_access}
+                    onChange={(checked) => updateCodexDraft({ network_access: checked })}
+                  />
+                </Card>
+
+                <Card title="项目权限" subtitle="按项目配置 trust_level，不显示其它项目原始配置。">
+                  <div className="project-list">
+                    {codexDraft.projects.length === 0 && <span className="empty-note">还没有项目权限记录。</span>}
+                    {codexDraft.projects.map((project, index) => (
+                      <div className="project-row" key={project.path || index}>
+                        <code>{project.path || '未设置路径'}</code>
+                        <select value={project.trust_level} onChange={(event) => updateCodexProject(index, { trust_level: event.target.value })}>
+                          <option value="">默认</option>
+                          <option value="trusted">信任</option>
+                          <option value="untrusted">不信任</option>
+                        </select>
+                        <button className="icon-button" type="button" title="移除" onClick={() => removeCodexProject(index)}>
+                          <LogOut size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="update-row">
+                    <button className="icon-text" type="button" onClick={() => void addCodexProject()}>
+                      <FolderOpen size={15} />
+                      添加项目
+                    </button>
+                    <button className="primary icon-text" type="button" disabled={loading.desktop || !codexConfigChanged(codexConfig, codexDraft)} onClick={() => void saveCodexConfig()}>
+                      {loading.desktop ? <Loader2 className="spin" size={15} /> : <CheckCircle2 size={15} />}
+                      保存配置
+                    </button>
+                  </div>
+                </Card>
+              </>
+            )}
+          </SettingsStack>
+        )}
+
+        {section === 'about' && (
           <SettingsStack>
             <Card title="主题" subtitle="保留最接近系统设置的三档，减少无意义的装饰主题。">
               <div className="theme-segment">
@@ -519,11 +846,6 @@ function App() {
                 <ThemeButton icon={<Moon size={17} />} label="暗黑" value="dark" current={settings.theme} onClick={updateSettings} />
               </div>
             </Card>
-          </SettingsStack>
-        )}
-
-        {section === 'about' && (
-          <SettingsStack>
             <Card title="Codex Session Bridge" subtitle="后台 agent 的本地配置窗口。">
               <StatusGrid>
                 <Metric
@@ -642,6 +964,68 @@ function normalizePort(value: string) {
   return String(numeric);
 }
 
+function normalizeRelayApiBase(value: string) {
+  let base = value.trim();
+  if (!base) return '';
+  base = base.replace(/\/?v0\/management\/?$/i, '');
+  base = base.replace(/\/+$/g, '');
+  if (!/^https?:\/\//i.test(base)) base = `https://${base}`;
+  return base;
+}
+
+function relayWssFromApiBase(value: string) {
+  const base = normalizeRelayApiBase(value);
+  if (!base) return '';
+  try {
+    const url = new URL(base);
+    url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+    url.pathname = '/agent';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
+function relayConfigChanged(
+  saved: BridgeSettings,
+  draft: Pick<BridgeSettings, 'relayApiBase' | 'relayWssUrl' | 'autoConnectRelay'>,
+) {
+  return (
+    normalizeRelayApiBase(saved.relayApiBase) !== normalizeRelayApiBase(draft.relayApiBase) ||
+    saved.relayWssUrl.trim() !== draft.relayWssUrl.trim() ||
+    saved.autoConnectRelay !== draft.autoConnectRelay
+  );
+}
+
+function normalizeCodexConfigDraft(config: CodexConfig): CodexConfig {
+  const projects = config.projects
+    .map((project) => ({ path: project.path.trim(), trust_level: project.trust_level.trim() }))
+    .filter((project) => project.path)
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    ...config,
+    model: config.model.trim(),
+    model_provider: config.model_provider.trim() || 'codex',
+    model_reasoning_effort: config.model_reasoning_effort.trim(),
+    approval_policy: config.approval_policy.trim(),
+    sandbox_mode: config.sandbox_mode.trim(),
+    file_opener: config.file_opener.trim(),
+    history_persistence: config.history_persistence.trim(),
+    base_url: config.base_url.trim(),
+    provider_name: config.provider_name.trim(),
+    wire_api: config.wire_api.trim(),
+    projects,
+  };
+}
+
+function codexConfigChanged(saved: CodexConfig | null, draft: CodexConfig | null) {
+  if (!draft) return false;
+  if (!saved) return true;
+  return JSON.stringify(normalizeCodexConfigDraft(saved)) !== JSON.stringify(normalizeCodexConfigDraft(draft));
+}
+
 function Metric({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail: string }) {
   return (
     <div className="metric">
@@ -703,20 +1087,21 @@ function ThemeButton({
 function RelayLoginCard({
   settings,
   session,
+  onApiBaseChange,
   onSettings,
   onLogin,
   onLogout,
 }: {
   settings: BridgeSettings;
   session: RelaySession | null;
+  onApiBaseChange: (value: string) => void;
   onSettings: (settings: BridgeSettings) => void;
-  onLogin: (session: RelaySession, persistent: boolean) => void;
+  onLogin: (session: RelaySession) => void;
   onLogout: () => void;
 }) {
   const [apiBase, setApiBase] = useState(session?.apiBase || settings.relayApiBase);
   const [username, setUsername] = useState(session?.username || '');
   const [password, setPassword] = useState('');
-  const [persistent, setPersistent] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -727,7 +1112,7 @@ function RelayLoginCard({
     try {
       const next = await loginRelay(apiBase, username, password);
       onSettings({ ...settings, relayApiBase: next.apiBase });
-      onLogin(next, persistent);
+      onLogin(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败');
     } finally {
@@ -765,7 +1150,14 @@ function RelayLoginCard({
         {error && <div className="alert compact">{error}</div>}
         <label className="field">
           <span>中转站 API Base</span>
-          <input value={apiBase} onChange={(event) => setApiBase(event.target.value)} />
+          <input
+            value={apiBase}
+            onChange={(event) => {
+              setApiBase(event.target.value);
+              onApiBaseChange(event.target.value);
+            }}
+            placeholder="https://<your-relay-host>"
+          />
         </label>
         <label className="field">
           <span>用户名</span>
@@ -776,10 +1168,7 @@ function RelayLoginCard({
           <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
         </label>
         <div className="login-actions">
-          <label className="toggle-inline">
-            <input type="checkbox" checked={persistent} onChange={(event) => setPersistent(event.target.checked)} />
-            <span>保持登录</span>
-          </label>
+          <span>登录信息会保存在本机</span>
           <button className="primary icon-text" disabled={loading || !username.trim() || !password}>
             {loading ? <Loader2 className="spin" size={16} /> : <LogIn size={16} />}
             登录

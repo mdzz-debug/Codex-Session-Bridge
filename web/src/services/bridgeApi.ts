@@ -103,6 +103,38 @@ export interface LoginResponse {
   expires_at?: string;
 }
 
+export interface CodexProjectConfig {
+  path: string;
+  trust_level: string;
+}
+
+export interface CodexConfig {
+  path: string;
+  codex_home: string;
+  platform: string;
+  exists: boolean;
+  model: string;
+  model_provider: string;
+  model_reasoning_effort: string;
+  approval_policy: string;
+  sandbox_mode: string;
+  file_opener: string;
+  web_search: boolean;
+  disable_response_storage: boolean;
+  history_persistence: string;
+  base_url: string;
+  provider_name: string;
+  requires_openai_auth: boolean;
+  wire_api: string;
+  network_access: boolean;
+  projects: CodexProjectConfig[];
+  warnings?: string[];
+}
+
+export interface CodexRestartResult {
+  restarted: boolean;
+}
+
 function normalizeApiBase(input: string): string {
   let base = input.trim();
   if (!base) return '';
@@ -145,6 +177,16 @@ export const bridgeApi = {
   health: (settings: BridgeSettings) => request<HealthInfo>(daemonUrl(settings, '/health')),
   device: (settings: BridgeSettings) => request<DeviceInfo>(daemonUrl(settings, '/v1/device')),
   relayStatus: (settings: BridgeSettings) => request<RelayRuntimeStatus>(daemonUrl(settings, '/v1/relay/status')),
+  codexConfig: (settings: BridgeSettings) => request<CodexConfig>(daemonUrl(settings, '/v1/codex/config')),
+  updateCodexConfig: (settings: BridgeSettings, config: CodexConfig) =>
+    request<CodexConfig>(daemonUrl(settings, '/v1/codex/config'), {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    }),
+  restartCodex: (settings: BridgeSettings) =>
+    request<CodexRestartResult>(daemonUrl(settings, '/v1/codex/restart'), {
+      method: 'POST',
+    }),
   configureRelay: (settings: BridgeSettings, session: RelaySession | null) =>
     request<RelayRuntimeStatus>(daemonUrl(settings, '/v1/relay/config'), {
       method: 'PUT',

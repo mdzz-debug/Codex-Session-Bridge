@@ -72,6 +72,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/relay/status", s.handleRelayStatus)
 	mux.HandleFunc("PUT /v1/relay/config", s.handleRelayConfig)
 	mux.HandleFunc("POST /v1/relay/config", s.handleRelayConfig)
+	mux.HandleFunc("GET /v1/codex/config", s.handleCodexConfigRead)
+	mux.HandleFunc("PUT /v1/codex/config", s.handleCodexConfigWrite)
+	mux.HandleFunc("POST /v1/codex/restart", s.handleCodexRestart)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/threads", s.handleThreadStart)
 	mux.HandleFunc("GET /v1/threads", s.handleThreadList)
@@ -102,6 +105,40 @@ func (s *Server) handleRelayConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.relay.Update(cfg))
+}
+
+func (s *Server) handleCodexConfigRead(w http.ResponseWriter, r *http.Request) {
+	cfg, _, err := readCodexConfig()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) handleCodexConfigWrite(w http.ResponseWriter, r *http.Request) {
+	var cfg CodexConfig
+	if !decodeJSON(w, r, &cfg) {
+		return
+	}
+	next, err := writeCodexConfig(cfg)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, next)
+}
+
+func (s *Server) handleCodexRestart(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	if err := s.app.Restart(ctx); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"restarted": true,
+	})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -669,7 +706,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

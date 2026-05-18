@@ -1,5 +1,5 @@
 export type ThemeName = 'system' | 'light' | 'dark';
-export type SettingsSection = 'general' | 'relay' | 'appearance' | 'about';
+export type SettingsSection = 'general' | 'relay' | 'codex' | 'about';
 
 export interface BridgeSettings {
   daemonBase: string;
@@ -20,6 +20,7 @@ export interface RelaySession {
 const SETTINGS_KEY = 'csb.settings.v1';
 const SESSION_KEY = 'csb.relay.session.v1';
 const SECTION_KEY = 'csb.desktop.section.v1';
+const LEGACY_RELAY_HOSTS = [atob('emMubHVvaGFvLm9ubGluZQ==')];
 
 export const defaultSettings: BridgeSettings = {
   daemonBase: '',
@@ -35,6 +36,8 @@ export function readSettings(): BridgeSettings {
     if (!raw) return defaultSettings;
     const parsed = { ...defaultSettings, ...(JSON.parse(raw) as Partial<BridgeSettings>) };
     if (!['system', 'light', 'dark'].includes(parsed.theme)) parsed.theme = 'system';
+    parsed.relayApiBase = scrubLegacyRelayUrl(parsed.relayApiBase);
+    parsed.relayWssUrl = scrubLegacyRelayUrl(parsed.relayWssUrl);
     return parsed;
   } catch {
     return defaultSettings;
@@ -50,9 +53,14 @@ export function readRelaySession(): RelaySession | null {
     const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<RelaySession>;
+    const apiBase = scrubLegacyRelayUrl(parsed.apiBase || '');
+    if (!apiBase && parsed.apiBase) {
+      clearRelaySession();
+      return null;
+    }
     if (!parsed.apiBase || !parsed.token || !parsed.username) return null;
     return {
-      apiBase: parsed.apiBase,
+      apiBase,
       token: parsed.token,
       username: parsed.username,
       role: parsed.role === 'admin' ? 'admin' : 'user',
@@ -82,7 +90,8 @@ export function clearRelaySession() {
 export function readDesktopSection(): SettingsSection {
   try {
     const value = localStorage.getItem(SECTION_KEY);
-    return value === 'relay' || value === 'appearance' || value === 'about' ? value : 'general';
+    if (value === 'appearance') return 'about';
+    return value === 'relay' || value === 'codex' || value === 'about' ? value : 'general';
   } catch {
     return 'general';
   }
@@ -90,4 +99,11 @@ export function readDesktopSection(): SettingsSection {
 
 export function saveDesktopSection(section: SettingsSection) {
   localStorage.setItem(SECTION_KEY, section);
+}
+
+function scrubLegacyRelayUrl(value: string) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+  const lower = trimmed.toLowerCase();
+  return LEGACY_RELAY_HOSTS.some((host) => lower.includes(host)) ? '' : trimmed;
 }

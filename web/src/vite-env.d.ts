@@ -33,6 +33,13 @@ interface BridgeDesktopUpdateInfo {
   message?: string;
 }
 
+interface BridgeDesktopCodexRestartStatus {
+  wasRunning: boolean;
+  restarted: boolean;
+  skipped: boolean;
+  error?: string;
+}
+
 interface Window {
   bridgeDesktop?: {
     platform: string;
@@ -47,6 +54,7 @@ interface Window {
     openUpdatePage: (url?: string) => Promise<void>;
     openPrivacySettings: () => Promise<{ opened: boolean; target: string }>;
     chooseProjectFolder: () => Promise<{ path: string } | null>;
+    restartCodexDesktopIfRunning: () => Promise<BridgeDesktopCodexRestartStatus>;
     resizeWindow: (height: number) => Promise<boolean>;
   };
 }

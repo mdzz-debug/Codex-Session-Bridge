@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, dialog } = require('electron');
-const { spawn } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
@@ -527,6 +527,75 @@ async function chooseProjectFolder() {
   return { path: result.filePaths[0] };
 }
 
+function execFileAsync(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function codexDesktopRunning() {
+  if (process.platform === 'darwin') {
+    const result = await execFileAsync('osascript', ['-e', 'application "Codex" is running']);
+    return String(result.stdout || '').trim() === 'true';
+  }
+  if (process.platform === 'win32') {
+    try {
+      const result = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', 'if (Get-Process -Name Codex -ErrorAction SilentlyContinue) { "true" } else { "false" }']);
+      return String(result.stdout || '').trim() === 'true';
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+async function restartCodexDesktopIfRunning() {
+  const status = {
+    wasRunning: false,
+    restarted: false,
+    skipped: true,
+    error: '',
+  };
+  try {
+    status.wasRunning = await codexDesktopRunning();
+    if (!status.wasRunning) return status;
+    status.skipped = false;
+    if (process.platform === 'darwin') {
+      await execFileAsync('osascript', ['-e', 'tell application "Codex" to quit']);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      await execFileAsync('open', ['-a', 'Codex']);
+      status.restarted = true;
+      return status;
+    }
+    if (process.platform === 'win32') {
+      await execFileAsync('powershell.exe', ['-NoProfile', '-Command', 'Stop-Process -Name Codex -ErrorAction SilentlyContinue']);
+      const codexApp = process.env.LOCALAPPDATA
+        ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Codex', 'Codex.exe')
+        : '';
+      if (codexApp && fs.existsSync(codexApp)) {
+        spawn(codexApp, [], { detached: true, stdio: 'ignore' }).unref();
+        status.restarted = true;
+      } else {
+        status.error = '未找到 Codex 桌面端安装路径';
+      }
+      return status;
+    }
+    status.error = `${process.platform} 暂不支持自动重启 Codex 桌面端`;
+    return status;
+  } catch (error) {
+    status.error = error instanceof Error ? error.message : '重启 Codex 桌面端失败';
+    return status;
+  }
+}
+
 app.whenReady().then(async () => {
   readDesktopPreferences();
   ipcMain.handle('desktop:get-preferences', () => publicDesktopPreferences());
@@ -563,7 +632,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('desktop:resize-window', (_event, height) => {
     if (!mainWindow || !Number.isFinite(height)) return false;
     const targetHeight = Math.max(360, Math.min(860, Math.ceil(height)));
+    const [, windowHeight] = mainWindow.getSize();
     const [width, currentHeight] = mainWindow.getContentSize();
+    const frameHeight = Math.max(0, windowHeight - currentHeight);
+    mainWindow.setMinimumSize(500, targetHeight + frameHeight);
     if (Math.abs(currentHeight - targetHeight) < 2) return true;
     mainWindow.setContentSize(width, targetHeight, true);
     return true;
@@ -577,6 +649,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('desktop:open-update-page', (_event, url) => shell.openExternal(String(url || githubReleasesUrl)));
   ipcMain.handle('desktop:open-privacy-settings', () => openPrivacySettings());
   ipcMain.handle('desktop:choose-project-folder', () => chooseProjectFolder());
+  ipcMain.handle('desktop:restart-codex-desktop-if-running', () => restartCodexDesktopIfRunning());
   startDaemon();
   createWindow();
   createTray();

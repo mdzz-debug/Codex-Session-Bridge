@@ -14,4 +14,5 @@ contextBridge.exposeInMainWorld('bridgeDesktop', {
   openUpdatePage: (url) => ipcRenderer.invoke('desktop:open-update-page', url),
   openPrivacySettings: () => ipcRenderer.invoke('desktop:open-privacy-settings'),
   chooseProjectFolder: () => ipcRenderer.invoke('desktop:choose-project-folder'),
+  restartCodexDesktopIfRunning: () => ipcRenderer.invoke('desktop:restart-codex-desktop-if-running'),
 });

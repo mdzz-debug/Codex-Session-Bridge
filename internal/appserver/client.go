@@ -23,9 +23,14 @@ type Notification struct {
 }
 
 type Client struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	logger *slog.Logger
+	ctx       context.Context
+	bin       string
+	codexHome string
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	logger    *slog.Logger
+
+	processMu sync.RWMutex
 
 	nextID  atomic.Int64
 	writeMu sync.Mutex
@@ -77,6 +82,9 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 	}
 
 	c := &Client{
+		ctx:         ctx,
+		bin:         bin,
+		codexHome:   opts.CodexHome,
 		cmd:         cmd,
 		stdin:       stdin,
 		logger:      logger,
@@ -88,15 +96,7 @@ func Start(ctx context.Context, opts Options) (*Client, error) {
 		return nil, err
 	}
 
-	go c.readStdout(stdout)
-	go c.readStderr(stderr)
-	go func() {
-		err := cmd.Wait()
-		if err != nil {
-			logger.Warn("codex app-server exited", "error", err)
-		}
-		c.failPending(fmt.Errorf("codex app-server exited: %w", err))
-	}()
+	c.watchCommand(cmd, stdout, stderr)
 
 	initParams := map[string]any{
 		"clientInfo": map[string]any{
@@ -122,10 +122,6 @@ func (c *Client) Request(ctx context.Context, method string, params any, out any
 	id := c.nextID.Add(1)
 	ch := make(chan response, 1)
 
-	c.pendingMu.Lock()
-	c.pending[id] = ch
-	c.pendingMu.Unlock()
-
 	msg := map[string]any{
 		"id":     id,
 		"method": method,
@@ -133,12 +129,21 @@ func (c *Client) Request(ctx context.Context, method string, params any, out any
 	}
 	b, err := json.Marshal(msg)
 	if err != nil {
-		c.deletePending(id)
 		return err
 	}
 
 	c.writeMu.Lock()
-	_, err = c.stdin.Write(append(b, '\n'))
+	c.processMu.RLock()
+	stdin := c.stdin
+	if stdin == nil {
+		err = errors.New("codex app-server is not running")
+	} else {
+		c.pendingMu.Lock()
+		c.pending[id] = ch
+		c.pendingMu.Unlock()
+		_, err = stdin.Write(append(b, '\n'))
+	}
+	c.processMu.RUnlock()
 	c.writeMu.Unlock()
 	if err != nil {
 		c.deletePending(id)
@@ -181,13 +186,98 @@ func (c *Client) Subscribe() (<-chan Notification, func()) {
 }
 
 func (c *Client) Close() error {
-	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Signal(os.Interrupt)
-		time.Sleep(150 * time.Millisecond)
-		_ = c.cmd.Process.Kill()
-	}
+	c.processMu.Lock()
+	c.closeCommandLocked()
+	c.processMu.Unlock()
 	return nil
+}
+
+func (c *Client) Restart(ctx context.Context) error {
+	c.writeMu.Lock()
+	c.processMu.Lock()
+	c.failPending(errors.New("codex app-server restarting"))
+	c.closeCommandLocked()
+
+	cmd := exec.CommandContext(c.ctx, c.bin, "app-server", "--listen", "stdio://")
+	if c.codexHome != "" {
+		cmd.Env = append(os.Environ(), "CODEX_HOME="+c.codexHome)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		c.processMu.Unlock()
+		c.writeMu.Unlock()
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		c.processMu.Unlock()
+		c.writeMu.Unlock()
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		c.processMu.Unlock()
+		c.writeMu.Unlock()
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		c.processMu.Unlock()
+		c.writeMu.Unlock()
+		return err
+	}
+	c.cmd = cmd
+	c.stdin = stdin
+	c.watchCommand(cmd, stdout, stderr)
+	c.processMu.Unlock()
+	c.writeMu.Unlock()
+
+	initParams := map[string]any{
+		"clientInfo": map[string]any{
+			"name":    "codex-session-bridge",
+			"title":   "Codex Session Bridge",
+			"version": "0.1.0",
+		},
+		"capabilities": map[string]any{
+			"experimentalApi": true,
+		},
+	}
+	var initResult map[string]any
+	if err := c.Request(ctx, "initialize", initParams, &initResult); err != nil {
+		return fmt.Errorf("initialize codex app-server: %w", err)
+	}
+	c.logger.Info("restarted codex app-server", "user_agent", initResult["userAgent"], "codex_home", initResult["codexHome"])
+	return nil
+}
+
+func (c *Client) closeCommandLocked() {
+	if c.stdin != nil {
+		_ = c.stdin.Close()
+		c.stdin = nil
+	}
+	cmd := c.cmd
+	c.cmd = nil
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(os.Interrupt)
+		time.Sleep(150 * time.Millisecond)
+		_ = cmd.Process.Kill()
+	}
+}
+
+func (c *Client) watchCommand(cmd *exec.Cmd, stdout io.Reader, stderr io.Reader) {
+	go c.readStdout(stdout)
+	go c.readStderr(stderr)
+	go func() {
+		err := cmd.Wait()
+		c.processMu.RLock()
+		isCurrent := c.cmd == cmd
+		c.processMu.RUnlock()
+		if err != nil {
+			c.logger.Warn("codex app-server exited", "error", err)
+		}
+		if isCurrent {
+			c.failPending(fmt.Errorf("codex app-server exited: %w", err))
+		}
+	}()
 }
 
 func (c *Client) readStdout(r io.Reader) {

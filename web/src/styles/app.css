@@ -1,7 +1,8 @@
 .settings-shell {
   display: grid;
-  grid-template-rows: auto auto;
+  grid-template-rows: auto minmax(0, 1fr);
   width: 100vw;
+  height: 100vh;
   min-height: 0;
   overflow: hidden;
   background: var(--bg);
@@ -100,8 +101,13 @@
 .settings-main {
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: hidden;
   padding: 10px 12px 14px;
+}
+
+.settings-main.scrollable {
+  overflow-y: auto;
 }
 
 .eyebrow {
@@ -207,6 +213,12 @@ button:disabled,
   border-radius: 9px;
   font-size: 12px;
   line-height: 1.35;
+}
+
+.alert.success {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+  border-color: color-mix(in srgb, var(--ok) 28%, var(--line));
 }
 
 .alert.compact {
@@ -385,7 +397,8 @@ code {
   font-weight: 650;
 }
 
-input {
+input,
+select {
   width: 100%;
   height: 28px;
   border: 1px solid var(--line);
@@ -396,9 +409,51 @@ input {
   padding: 0 10px;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 13px) 11px, calc(100% - 8px) 11px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 24px;
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.project-list {
+  display: grid;
+  gap: 7px;
+}
+
+.project-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px 28px;
+  gap: 7px;
+  align-items: center;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.project-row select {
+  height: 26px;
+  font-size: 11px;
+}
+
+.empty-note {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .toggle-row {
@@ -512,6 +567,12 @@ input:focus {
   justify-content: space-between;
   gap: 12px;
   padding-top: 2px;
+}
+
+.login-actions > span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .theme-segment {
