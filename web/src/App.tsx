@@ -121,6 +121,7 @@ function App() {
   const mainRef = useRef<HTMLElement | null>(null);
   const eventRef = useRef<WebSocket | null>(null);
   const lastResizeHeightRef = useRef(0);
+  const resizeTimerRef = useRef<number | null>(null);
   const generalHeightRef = useRef(0);
   const relayConnection = relayConnectionState(session, settings, relayRuntime);
 
@@ -140,6 +141,7 @@ function App() {
   useEffect(() => {
     void bootstrap();
     void loadDesktopPreferences();
+    void loadDesktopRelayState();
     void loadDaemonDesktopStatus();
     void loadAppInfo();
   }, []);
@@ -188,7 +190,11 @@ function App() {
         const targetHeight = Math.max(360, Math.min(860, Math.ceil(height)));
         if (Math.abs(targetHeight - lastResizeHeightRef.current) < 2) return;
         lastResizeHeightRef.current = targetHeight;
-        void window.bridgeDesktop?.resizeWindow(height);
+        if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
+        resizeTimerRef.current = window.setTimeout(() => {
+          resizeTimerRef.current = null;
+          void window.bridgeDesktop?.resizeWindow?.(targetHeight);
+        }, 90);
       });
     };
     resize();
@@ -197,6 +203,7 @@ function App() {
     observer.observe(mainRef.current);
     return () => {
       window.cancelAnimationFrame(frame);
+      if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
       observer.disconnect();
     };
   }, [
@@ -215,6 +222,12 @@ function App() {
     codexDraft?.projects.length,
     selectedFolder,
   ]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(''), 1800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   async function bootstrap() {
     setLoading((next) => ({ ...next, boot: true }));
@@ -269,6 +282,38 @@ function App() {
       setDaemonPortDraft(next.daemonPort || '8787');
     } catch {
       setDesktopPrefs(fallbackDesktopPrefs);
+    }
+  }
+
+  async function loadDesktopRelayState() {
+    if (!window.bridgeDesktop?.getRelayState) return;
+    try {
+      const state = await window.bridgeDesktop.getRelayState();
+      if (state.session?.apiBase && state.session.token && state.session.username) {
+        const nextSession: RelaySession = {
+          apiBase: state.session.apiBase,
+          token: state.session.token,
+          username: state.session.username,
+          role: state.session.role === 'admin' ? 'admin' : 'user',
+          expiresAt: state.session.expiresAt,
+        };
+        saveRelaySession(nextSession, true);
+        setSession(nextSession);
+      }
+      if (state.settings) {
+        setSettings((current) => {
+          const next = {
+            ...current,
+            relayApiBase: state.settings?.relayApiBase ?? current.relayApiBase,
+            relayWssUrl: state.settings?.relayWssUrl ?? current.relayWssUrl,
+            autoConnectRelay: typeof state.settings?.autoConnectRelay === 'boolean' ? state.settings.autoConnectRelay : current.autoConnectRelay,
+          };
+          saveSettings(next);
+          return next;
+        });
+      }
+    } catch {
+      // LocalStorage remains the fallback when the desktop bridge is unavailable.
     }
   }
 
@@ -490,14 +535,28 @@ function App() {
   function saveRelayConfig() {
     const relayApiBase = normalizeRelayApiBase(relayDraft.relayApiBase);
     const relayWssUrl = relayDraft.relayWssUrl.trim() || relayWssFromApiBase(relayApiBase);
-    setSettings((current) => ({
-      ...current,
+    const nextSettings = {
+      ...settings,
       relayApiBase,
       relayWssUrl,
       autoConnectRelay: relayDraft.autoConnectRelay,
-    }));
+    };
+    setSettings(nextSettings);
+    saveSettings(nextSettings);
+    void persistDesktopRelayState(nextSettings, session);
     setError('');
     setNotice('中转站连接配置已保存。');
+  }
+
+  async function persistDesktopRelayState(nextSettings: BridgeSettings, nextSession: RelaySession | null) {
+    await window.bridgeDesktop?.setRelayState?.({
+      settings: {
+        relayApiBase: nextSettings.relayApiBase,
+        relayWssUrl: nextSettings.relayWssUrl,
+        autoConnectRelay: nextSettings.autoConnectRelay,
+      },
+      session: nextSession,
+    });
   }
 
   function connectEvents() {
@@ -639,7 +698,8 @@ function App() {
               onLogin={(nextSession) => {
                 saveRelaySession(nextSession, true);
                 setSession(nextSession);
-                setSettings((current) => {
+                const nextSettings = (() => {
+                  const current = settings;
                   const currentDerivedWss = relayWssFromApiBase(current.relayApiBase);
                   const nextDerivedWss = relayWssFromApiBase(nextSession.apiBase);
                   return {
@@ -647,12 +707,16 @@ function App() {
                     relayApiBase: nextSession.apiBase,
                     relayWssUrl: !current.relayWssUrl.trim() || current.relayWssUrl.trim() === currentDerivedWss ? nextDerivedWss : current.relayWssUrl,
                   };
-                });
+                })();
+                setSettings(nextSettings);
+                saveSettings(nextSettings);
+                void persistDesktopRelayState(nextSettings, nextSession);
                 setNotice('中转站账号已保存。');
               }}
               onLogout={() => {
                 clearRelaySession();
                 setSession(null);
+                void persistDesktopRelayState(settings, null);
                 setNotice('');
               }}
             />
@@ -715,6 +779,16 @@ function App() {
                   <label className="field">
                     <span>接口地址</span>
                     <input value={codexDraft.base_url} onChange={(event) => updateCodexDraft({ base_url: event.target.value })} placeholder="https://api.openai.com/v1" />
+                  </label>
+                  <label className="field">
+                    <span>API Key</span>
+                    <input
+                      type="text"
+                      value={codexDraft.api_key || ''}
+                      onChange={(event) => updateCodexDraft({ api_key: event.target.value })}
+                      placeholder="OPENAI_API_KEY"
+                      autoComplete="off"
+                    />
                   </label>
                   <div className="config-grid">
                     <label className="field">
@@ -1016,6 +1090,7 @@ function normalizeCodexConfigDraft(config: CodexConfig): CodexConfig {
     base_url: config.base_url.trim(),
     provider_name: config.provider_name.trim(),
     wire_api: config.wire_api.trim(),
+    api_key: config.api_key?.trim() || '',
     projects,
   };
 }

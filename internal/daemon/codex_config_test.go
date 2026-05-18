@@ -158,3 +158,88 @@ persistence = "save-all"
 		t.Fatalf("history persistence should not be cleared:\n%s", updated)
 	}
 }
+
+func TestCodexConfigUsesAndUpdatesActiveProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	path := filepath.Join(home, "config.toml")
+	raw := `profile = "auto-max"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+model = "gpt-5.5"
+model_reasoning_effort = "medium"
+
+[profiles.auto-max]
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+model = "gpt-5.2"
+model_reasoning_effort = "low"
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := readCodexConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profile != "auto-max" || cfg.SandboxMode != "workspace-write" || cfg.ApprovalPolicy != "on-request" || cfg.Model != "gpt-5.2" {
+		t.Fatalf("expected active profile to override top-level values: %#v", cfg)
+	}
+
+	cfg.SandboxMode = "danger-full-access"
+	cfg.ApprovalPolicy = "never"
+	cfg.Model = "gpt-5.5"
+	cfg.ModelReasoningEffort = "high"
+	if _, err := writeCodexConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	updatedBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := string(updatedBytes)
+	for _, want := range []string{
+		`[profiles.auto-max]`,
+		`model = "gpt-5.5"`,
+		`model_reasoning_effort = "high"`,
+		`approval_policy = "never"`,
+		`sandbox_mode = "danger-full-access"`,
+	} {
+		if !strings.Contains(updated, want) {
+			t.Fatalf("updated profile config missing %q:\n%s", want, updated)
+		}
+	}
+}
+
+func TestCodexConfigReadsAndWritesAPIKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model = "gpt-5.2"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"sk-existing1234"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := readCodexConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.APIKeyConfigured || cfg.APIKey != "sk-existing1234" {
+		t.Fatalf("unexpected API key metadata: %#v", cfg)
+	}
+
+	cfg.APIKey = "sk-new5678"
+	if _, err := writeCodexConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	apiKey, err := readCodexAPIKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiKey != "sk-new5678" {
+		t.Fatalf("unexpected written API key %q", apiKey)
+	}
+}

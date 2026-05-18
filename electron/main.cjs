@@ -27,6 +27,7 @@ let isQuitting = false;
 let daemonStoppedByUser = false;
 let daemonLoadTimer;
 let daemonRestartTimer;
+let currentMinimumHeight = 360;
 let lastRelayStatus;
 let trayStatusRefreshing = false;
 let desktopPreferences = {
@@ -52,6 +53,52 @@ function daemonUrl() {
 
 function preferencesPath() {
   return path.join(app.getPath('userData'), 'desktop-preferences.json');
+}
+
+function relayStatePath() {
+  return path.join(app.getPath('userData'), 'relay-state.json');
+}
+
+function sanitizeRelaySettings(settings = {}) {
+  return {
+    relayApiBase: typeof settings.relayApiBase === 'string' ? settings.relayApiBase : '',
+    relayWssUrl: typeof settings.relayWssUrl === 'string' ? settings.relayWssUrl : '',
+    autoConnectRelay: Boolean(settings.autoConnectRelay),
+  };
+}
+
+function sanitizeRelaySession(session) {
+  if (!session || typeof session !== 'object') return null;
+  if (!session.apiBase || !session.token || !session.username) return null;
+  return {
+    apiBase: String(session.apiBase),
+    token: String(session.token),
+    username: String(session.username),
+    role: session.role === 'admin' ? 'admin' : 'user',
+    expiresAt: typeof session.expiresAt === 'string' ? session.expiresAt : undefined,
+  };
+}
+
+function readRelayState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(relayStatePath(), 'utf8'));
+    return {
+      settings: sanitizeRelaySettings(parsed.settings),
+      session: sanitizeRelaySession(parsed.session),
+    };
+  } catch {
+    return { settings: null, session: null };
+  }
+}
+
+function writeRelayState(state = {}) {
+  const next = {
+    settings: sanitizeRelaySettings(state.settings),
+    session: sanitizeRelaySession(state.session),
+  };
+  fs.mkdirSync(app.getPath('userData'), { recursive: true });
+  fs.writeFileSync(relayStatePath(), JSON.stringify(next, null, 2), { mode: 0o600 });
+  return next;
 }
 
 function readDesktopPreferences() {
@@ -599,6 +646,8 @@ async function restartCodexDesktopIfRunning() {
 app.whenReady().then(async () => {
   readDesktopPreferences();
   ipcMain.handle('desktop:get-preferences', () => publicDesktopPreferences());
+  ipcMain.handle('desktop:get-relay-state', () => readRelayState());
+  ipcMain.handle('desktop:set-relay-state', (_event, state = {}) => writeRelayState(state));
   ipcMain.handle('desktop:set-preferences', (_event, patch = {}) => {
     desktopPreferences = {
       ...desktopPreferences,
@@ -635,7 +684,11 @@ app.whenReady().then(async () => {
     const [, windowHeight] = mainWindow.getSize();
     const [width, currentHeight] = mainWindow.getContentSize();
     const frameHeight = Math.max(0, windowHeight - currentHeight);
-    mainWindow.setMinimumSize(500, targetHeight + frameHeight);
+    const targetMinimumHeight = targetHeight + frameHeight;
+    if (Math.abs(targetMinimumHeight - currentMinimumHeight) >= 2) {
+      currentMinimumHeight = targetMinimumHeight;
+      mainWindow.setMinimumSize(500, targetMinimumHeight);
+    }
     if (Math.abs(currentHeight - targetHeight) < 2) return true;
     mainWindow.setContentSize(width, targetHeight, true);
     return true;

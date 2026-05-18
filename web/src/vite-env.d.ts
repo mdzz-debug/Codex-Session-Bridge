@@ -40,10 +40,27 @@ interface BridgeDesktopCodexRestartStatus {
   error?: string;
 }
 
+interface BridgeDesktopRelayState {
+  settings?: {
+    relayApiBase?: string;
+    relayWssUrl?: string;
+    autoConnectRelay?: boolean;
+  };
+  session?: {
+    apiBase: string;
+    token: string;
+    username: string;
+    role: 'admin' | 'user';
+    expiresAt?: string;
+  } | null;
+}
+
 interface Window {
   bridgeDesktop?: {
     platform: string;
     getPreferences: () => Promise<BridgeDesktopPreferences>;
+    getRelayState: () => Promise<BridgeDesktopRelayState>;
+    setRelayState: (state: BridgeDesktopRelayState) => Promise<BridgeDesktopRelayState>;
     setPreferences: (patch: Partial<BridgeDesktopPreferences>) => Promise<BridgeDesktopPreferences>;
     getDaemonStatus: () => Promise<BridgeDesktopDaemonStatus>;
     startDaemon: () => Promise<BridgeDesktopDaemonStatus>;

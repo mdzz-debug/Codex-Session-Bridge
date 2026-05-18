@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ type CodexConfig struct {
 	CodexHome              string         `json:"codex_home"`
 	Platform               string         `json:"platform"`
 	Exists                 bool           `json:"exists"`
+	Profile                string         `json:"profile"`
 	Model                  string         `json:"model"`
 	ModelProvider          string         `json:"model_provider"`
 	ModelReasoningEffort   string         `json:"model_reasoning_effort"`
@@ -27,6 +29,8 @@ type CodexConfig struct {
 	ProviderName           string         `json:"provider_name"`
 	RequiresOpenAIAuth     bool           `json:"requires_openai_auth"`
 	WireAPI                string         `json:"wire_api"`
+	APIKeyConfigured       bool           `json:"api_key_configured"`
+	APIKey                 string         `json:"api_key,omitempty"`
 	NetworkAccess          bool           `json:"network_access"`
 	Projects               []CodexProject `json:"projects"`
 	Warnings               []string       `json:"warnings,omitempty"`
@@ -63,6 +67,11 @@ func codexConfigPath() (string, string) {
 	return home, filepath.Join(home, "config.toml")
 }
 
+func codexAuthPath() (string, string) {
+	home := defaultCodexHome()
+	return home, filepath.Join(home, "auth.json")
+}
+
 func readCodexConfig() (CodexConfig, *tomlDoc, error) {
 	home, path := codexConfigPath()
 	cfg := CodexConfig{
@@ -81,11 +90,19 @@ func readCodexConfig() (CodexConfig, *tomlDoc, error) {
 	}
 	cfg.Exists = true
 	doc := parseToml(string(raw))
+	cfg.Profile = doc.stringValue("", "profile")
 	cfg.Model = doc.stringValue("", "model")
 	cfg.ModelProvider = doc.stringValue("", "model_provider")
 	cfg.ModelReasoningEffort = doc.stringValue("", "model_reasoning_effort")
 	cfg.ApprovalPolicy = doc.stringValue("", "approval_policy")
 	cfg.SandboxMode = doc.stringValue("", "sandbox_mode")
+	if cfg.Profile != "" {
+		profileSection := "profiles." + cfg.Profile
+		cfg.Model = firstNonEmpty(doc.stringValue(profileSection, "model"), cfg.Model)
+		cfg.ModelReasoningEffort = firstNonEmpty(doc.stringValue(profileSection, "model_reasoning_effort"), cfg.ModelReasoningEffort)
+		cfg.ApprovalPolicy = firstNonEmpty(doc.stringValue(profileSection, "approval_policy"), cfg.ApprovalPolicy)
+		cfg.SandboxMode = firstNonEmpty(doc.stringValue(profileSection, "sandbox_mode"), cfg.SandboxMode)
+	}
 	cfg.FileOpener = doc.stringValue("", "file_opener")
 	cfg.WebSearch = doc.webSearchEnabled()
 	cfg.DisableResponseStorage = doc.boolValue("", "disable_response_storage")
@@ -98,6 +115,13 @@ func readCodexConfig() (CodexConfig, *tomlDoc, error) {
 	cfg.ProviderName = doc.stringValue(providerSection, "name")
 	cfg.RequiresOpenAIAuth = doc.boolValue(providerSection, "requires_openai_auth")
 	cfg.WireAPI = doc.stringValue(providerSection, "wire_api")
+	apiKey, err := readCodexAPIKey()
+	if err != nil {
+		cfg.Warnings = append(cfg.Warnings, "读取 auth.json 失败: "+err.Error())
+	} else if apiKey != "" {
+		cfg.APIKeyConfigured = true
+		cfg.APIKey = apiKey
+	}
 	cfg.NetworkAccess = doc.boolValue("sandbox_workspace_write", "network_access")
 	cfg.Projects = doc.projects()
 	return cfg, doc, nil
@@ -116,6 +140,17 @@ func writeCodexConfig(next CodexConfig) (CodexConfig, error) {
 	setString(doc, "", "model_reasoning_effort", next.ModelReasoningEffort)
 	setString(doc, "", "approval_policy", next.ApprovalPolicy)
 	setString(doc, "", "sandbox_mode", next.SandboxMode)
+	profile := strings.TrimSpace(current.Profile)
+	if profile == "" {
+		profile = strings.TrimSpace(next.Profile)
+	}
+	if profile != "" {
+		profileSection := "profiles." + profile
+		setString(doc, profileSection, "model", next.Model)
+		setString(doc, profileSection, "model_reasoning_effort", next.ModelReasoningEffort)
+		setString(doc, profileSection, "approval_policy", next.ApprovalPolicy)
+		setString(doc, profileSection, "sandbox_mode", next.SandboxMode)
+	}
 	setString(doc, "", "file_opener", next.FileOpener)
 	setWebSearch(doc, next.WebSearch)
 	setBool(doc, "", "disable_response_storage", next.DisableResponseStorage)
@@ -131,6 +166,11 @@ func writeCodexConfig(next CodexConfig) (CodexConfig, error) {
 	setString(doc, providerSection, "name", next.ProviderName)
 	setBool(doc, providerSection, "requires_openai_auth", next.RequiresOpenAIAuth)
 	setString(doc, providerSection, "wire_api", next.WireAPI)
+	if strings.TrimSpace(next.APIKey) != "" {
+		if err := writeCodexAPIKey(next.APIKey); err != nil {
+			return current, err
+		}
+	}
 	setBool(doc, "sandbox_workspace_write", "network_access", next.NetworkAccess)
 	for _, project := range next.Projects {
 		projectPath := strings.TrimSpace(project.Path)
@@ -353,4 +393,56 @@ func setRaw(doc *tomlDoc, section string, key string, value string) {
 
 func projectSection(path string) string {
 	return "projects." + strconv.Quote(path)
+}
+
+func readCodexAPIKey() (string, error) {
+	_, path := codexAuthPath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return "", err
+	}
+	value, _ := data["OPENAI_API_KEY"].(string)
+	return strings.TrimSpace(value), nil
+}
+
+func writeCodexAPIKey(value string) error {
+	apiKey := strings.TrimSpace(value)
+	if apiKey == "" {
+		return nil
+	}
+	home, path := codexAuthPath()
+	data := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &data)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	data["OPENAI_API_KEY"] = apiKey
+	if _, ok := data["auth_mode"]; !ok {
+		data["auth_mode"] = "apikey"
+	}
+	raw, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(raw, '\n'), 0o600)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

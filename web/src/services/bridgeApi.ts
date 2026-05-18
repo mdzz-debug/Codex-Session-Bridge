@@ -113,6 +113,7 @@ export interface CodexConfig {
   codex_home: string;
   platform: string;
   exists: boolean;
+  profile: string;
   model: string;
   model_provider: string;
   model_reasoning_effort: string;
@@ -126,6 +127,8 @@ export interface CodexConfig {
   provider_name: string;
   requires_openai_auth: boolean;
   wire_api: string;
+  api_key_configured: boolean;
+  api_key?: string;
   network_access: boolean;
   projects: CodexProjectConfig[];
   warnings?: string[];
