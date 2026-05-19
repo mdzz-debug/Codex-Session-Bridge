@@ -1,6 +1,6 @@
 {
   "name": "codex-session-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop client and local daemon for remote Codex session control.",
   "author": "Luohao",
   "private": true,
