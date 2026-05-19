@@ -219,6 +219,30 @@ func (m *RelayManager) connectOnce(ctx context.Context, generation uint64, cfg R
 	}
 
 	errCh := make(chan error, 1)
+	if m.app != nil {
+		appEvents, cancelEvents := m.app.Subscribe()
+		defer cancelEvents()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case n, ok := <-appEvents:
+					if !ok {
+						return
+					}
+					event := normalizeEvent(m.device.DeviceID, n)
+					if err := writeJSON(map[string]any{
+						"type":    "agent.event",
+						"payload": event,
+					}); err != nil {
+						errCh <- err
+						return
+					}
+				}
+			}
+		}()
+	}
 	go func() {
 		for {
 			var msg relayInboundMessage
@@ -276,14 +300,6 @@ func (m *RelayManager) handleRequest(ctx context.Context, msg relayInboundMessag
 		})
 		return
 	}
-	if m.app == nil {
-		_ = writeJSON(map[string]any{
-			"type":  "agent.error",
-			"id":    id,
-			"error": "codex app-server unavailable",
-		})
-		return
-	}
 	var params any
 	if len(msg.Params) > 0 && string(msg.Params) != "null" {
 		var decoded any
@@ -297,8 +313,63 @@ func (m *RelayManager) handleRequest(ctx context.Context, msg relayInboundMessag
 		}
 		params = decoded
 	}
+	if method == "codex/config/read" {
+		cfg, _, err := readCodexConfig()
+		if err != nil {
+			_ = writeJSON(map[string]any{
+				"type":  "agent.error",
+				"id":    id,
+				"error": err.Error(),
+			})
+			return
+		}
+		_ = writeJSON(map[string]any{
+			"type":   "agent.response",
+			"id":     id,
+			"result": cfg,
+		})
+		return
+	}
+	if m.app == nil {
+		_ = writeJSON(map[string]any{
+			"type":  "agent.error",
+			"id":    id,
+			"error": "codex app-server unavailable",
+		})
+		return
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	if method == "app/request/respond" {
+		var req struct {
+			ID     int64 `json:"id"`
+			Result any   `json:"result"`
+		}
+		if len(msg.Params) > 0 && string(msg.Params) != "null" {
+			if err := json.Unmarshal(msg.Params, &req); err != nil {
+				_ = writeJSON(map[string]any{
+					"type":  "agent.error",
+					"id":    id,
+					"error": err.Error(),
+				})
+				return
+			}
+		}
+		if err := m.app.Respond(req.ID, req.Result); err != nil {
+			_ = writeJSON(map[string]any{
+				"type":  "agent.error",
+				"id":    id,
+				"error": err.Error(),
+			})
+			return
+		}
+		_ = writeJSON(map[string]any{
+			"type":   "agent.response",
+			"id":     id,
+			"result": map[string]any{"ok": true},
+		})
+		return
+	}
 	var result json.RawMessage
 	if err := m.app.Request(reqCtx, method, params, &result); err != nil {
 		_ = writeJSON(map[string]any{

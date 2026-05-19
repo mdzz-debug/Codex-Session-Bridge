@@ -18,8 +18,10 @@ import (
 type Message map[string]any
 
 type Notification struct {
-	Method string         `json:"method"`
-	Params map[string]any `json:"params,omitempty"`
+	ID      int64          `json:"id,omitempty"`
+	Method  string         `json:"method"`
+	Params  map[string]any `json:"params,omitempty"`
+	Request map[string]any `json:"request,omitempty"`
 }
 
 type Client struct {
@@ -168,6 +170,31 @@ func (c *Client) Request(ctx context.Context, method string, params any, out any
 	}
 }
 
+func (c *Client) Respond(id int64, result any) error {
+	if id == 0 {
+		return errors.New("response id is required")
+	}
+	msg := map[string]any{
+		"id":     id,
+		"result": result,
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	c.writeMu.Lock()
+	c.processMu.RLock()
+	stdin := c.stdin
+	if stdin == nil {
+		err = errors.New("codex app-server is not running")
+	} else {
+		_, err = stdin.Write(append(b, '\n'))
+	}
+	c.processMu.RUnlock()
+	c.writeMu.Unlock()
+	return err
+}
+
 func (c *Client) Subscribe() (<-chan Notification, func()) {
 	ch := make(chan Notification, 128)
 	c.notifyMu.Lock()
@@ -291,6 +318,48 @@ func (c *Client) readStdout(r io.Reader) {
 			continue
 		}
 
+		if idRaw, hasID := raw["id"]; hasID {
+			if _, hasMethod := raw["method"]; !hasMethod {
+				var id int64
+				if err := json.Unmarshal(idRaw, &id); err != nil {
+					c.logger.Warn("invalid app-server response id", "error", err)
+					continue
+				}
+				res := response{Result: raw["result"]}
+				if errRaw, ok := raw["error"]; ok {
+					var errValue any
+					_ = json.Unmarshal(errRaw, &errValue)
+					res.Error = errValue
+				}
+				c.resolvePending(id, res)
+				continue
+			}
+		}
+
+		if methodRaw, ok := raw["method"]; ok {
+			var id int64
+			if idRaw, hasID := raw["id"]; hasID {
+				_ = json.Unmarshal(idRaw, &id)
+			}
+			var method string
+			if err := json.Unmarshal(methodRaw, &method); err != nil {
+				continue
+			}
+			params := map[string]any{}
+			if paramsRaw, ok := raw["params"]; ok && len(paramsRaw) > 0 {
+				_ = json.Unmarshal(paramsRaw, &params)
+			}
+			request := map[string]any{}
+			for key, value := range raw {
+				var decoded any
+				if err := json.Unmarshal(value, &decoded); err == nil {
+					request[key] = decoded
+				}
+			}
+			c.publish(Notification{ID: id, Method: method, Params: params, Request: request})
+			continue
+		}
+
 		if idRaw, ok := raw["id"]; ok {
 			var id int64
 			if err := json.Unmarshal(idRaw, &id); err != nil {
@@ -305,18 +374,6 @@ func (c *Client) readStdout(r io.Reader) {
 			}
 			c.resolvePending(id, res)
 			continue
-		}
-
-		if methodRaw, ok := raw["method"]; ok {
-			var method string
-			if err := json.Unmarshal(methodRaw, &method); err != nil {
-				continue
-			}
-			params := map[string]any{}
-			if paramsRaw, ok := raw["params"]; ok && len(paramsRaw) > 0 {
-				_ = json.Unmarshal(paramsRaw, &params)
-			}
-			c.publish(Notification{Method: method, Params: params})
 		}
 	}
 	if err := scanner.Err(); err != nil {

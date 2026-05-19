@@ -176,6 +176,7 @@ func (s *Server) handleThreadStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CWD            string         `json:"cwd"`
 		Model          string         `json:"model"`
+		Effort         string         `json:"effort"`
 		ApprovalPolicy string         `json:"approval_policy"`
 		Sandbox        string         `json:"sandbox"`
 		Config         map[string]any `json:"config"`
@@ -187,6 +188,9 @@ func (s *Server) handleThreadStart(w http.ResponseWriter, r *http.Request) {
 		"cwd":    nullableString(req.CWD),
 		"model":  nullableString(req.Model),
 		"config": nullableMap(req.Config),
+	}
+	if req.Effort != "" {
+		params["effort"] = req.Effort
 	}
 	if req.ApprovalPolicy != "" {
 		params["approvalPolicy"] = req.ApprovalPolicy
@@ -432,11 +436,13 @@ func normalizeEvent(deviceID string, n appserver.Notification) map[string]any {
 		eventType = "thread.token_usage_updated"
 	}
 	return map[string]any{
-		"type":         eventType,
-		"device_id":    deviceID,
-		"codex_method": n.Method,
-		"codex_params": n.Params,
-		"received_at":  time.Now().UTC().Format(time.RFC3339Nano),
+		"type":           eventType,
+		"device_id":      deviceID,
+		"app_request_id": n.ID,
+		"app_request":    n.Request,
+		"codex_method":   n.Method,
+		"codex_params":   n.Params,
+		"received_at":    time.Now().UTC().Format(time.RFC3339Nano),
 	}
 }
 
