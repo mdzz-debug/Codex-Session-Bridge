@@ -40,6 +40,16 @@ interface BridgeDesktopCodexRestartStatus {
   error?: string;
 }
 
+interface BridgeDesktopModelUnlockStatus {
+  available: boolean;
+  injected: boolean;
+  debugPort: number;
+  message: string;
+  targetTitle?: string;
+  targetUrl?: string;
+  error?: string;
+}
+
 interface BridgeDesktopRelayState {
   settings?: {
     relayApiBase?: string;
@@ -72,6 +82,8 @@ interface Window {
     openPrivacySettings: () => Promise<{ opened: boolean; target: string }>;
     chooseProjectFolder: () => Promise<{ path: string } | null>;
     restartCodexDesktopIfRunning: () => Promise<BridgeDesktopCodexRestartStatus>;
+    getModelUnlockStatus: () => Promise<BridgeDesktopModelUnlockStatus>;
+    applyModelUnlock: () => Promise<BridgeDesktopModelUnlockStatus>;
     resizeWindow: (height: number) => Promise<boolean>;
   };
 }

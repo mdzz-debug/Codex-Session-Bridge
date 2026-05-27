@@ -92,6 +92,22 @@ if [[ "$BUILD_WIN" == "true" ]]; then
   GOOS=windows GOARCH="$GO_WIN_ARCH" go build -o dist/bin/csb-daemon.exe ./cmd/csb-daemon
 fi
 
+echo "==> Building Rust injector"
+if [[ "$BUILD_MAC" == "true" ]]; then
+  npm run build:injector -- mac
+  if [[ ! -f dist/bin/csb-injector ]]; then
+    echo "Missing required packaged Rust injector: dist/bin/csb-injector" >&2
+    exit 1
+  fi
+fi
+if [[ "$BUILD_WIN" == "true" ]]; then
+  npm run build:injector -- win
+  if [[ ! -f dist/bin/csb-injector.exe ]]; then
+    echo "Missing required packaged Rust injector: dist/bin/csb-injector.exe" >&2
+    exit 1
+  fi
+fi
+
 if [[ "$BUILD_MAC" == "true" ]]; then
   echo "==> Packaging macOS ($MAC_ARCH)"
   electron_builder_with_fallback --mac zip "--$MAC_ARCH"

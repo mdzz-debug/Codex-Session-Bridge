@@ -26,6 +26,7 @@ import {
   relayStatusText,
   type BridgeEvent,
   type CodexConfig,
+  type CodexModelCatalog,
   type CodexProjectConfig,
   type DeviceInfo,
   type HealthInfo,
@@ -111,6 +112,9 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [codexConfig, setCodexConfig] = useState<CodexConfig | null>(null);
   const [codexDraft, setCodexDraft] = useState<CodexConfig | null>(null);
+  const [codexModelCatalog, setCodexModelCatalog] = useState<CodexModelCatalog | null>(null);
+  const [codexModelsLoading, setCodexModelsLoading] = useState(false);
+  const [modelUnlockStatus, setModelUnlockStatus] = useState<BridgeDesktopModelUnlockStatus | null>(null);
   const [selectedFolder, setSelectedFolder] = useState('');
   const [section, setSection] = useState<Section>(() => readDesktopSection());
   const [loading, setLoading] = useState({ boot: true, desktop: false });
@@ -160,6 +164,20 @@ function App() {
     if (section === 'about' || section === 'relay') void refreshRelayRuntime();
     if (section === 'codex') void loadCodexConfig();
   }, [section]);
+
+  useEffect(() => {
+    if (section !== 'codex' || !codexDraft) return;
+    const baseUrl = codexDraft.base_url.trim();
+    if (!baseUrl) {
+      setCodexModelCatalog(null);
+      setCodexModelsLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadCodexModelCatalog(codexDraft);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [section, codexDraft?.base_url, codexDraft?.api_key, codexDraft?.model_provider, codexDraft?.provider_name, codexDraft?.model]);
 
   useEffect(() => {
     if (!settings.autoConnectRelay || !session) return;
@@ -220,6 +238,8 @@ function App() {
     updateInfo?.latestVersion,
     codexDraft?.path,
     codexDraft?.projects.length,
+    modelUnlockStatus?.message,
+    modelUnlockStatus?.error,
     selectedFolder,
   ]);
 
@@ -438,8 +458,66 @@ function App() {
       setCodexConfig(next);
       setCodexDraft(next);
       setError('');
+      void loadModelUnlockStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : '读取 Codex 配置失败');
+    }
+  }
+
+  async function loadModelUnlockStatus() {
+    if (!window.bridgeDesktop?.getModelUnlockStatus) return;
+    try {
+      setModelUnlockStatus(await window.bridgeDesktop.getModelUnlockStatus());
+    } catch (err) {
+      setModelUnlockStatus({
+        available: false,
+        injected: false,
+        debugPort: 9229,
+        message: '无法读取解锁状态',
+        error: err instanceof Error ? err.message : '无法读取解锁状态',
+      });
+    }
+  }
+
+  async function loadCodexModelCatalog(config = codexDraft) {
+    if (!config || !config.base_url.trim()) return;
+    setCodexModelsLoading(true);
+    try {
+      const next = await bridgeApi.codexModelCatalog(settings, normalizeCodexConfigDraft(config));
+      setCodexModelCatalog(next);
+    } catch (err) {
+      setCodexModelCatalog({
+        status: 'failed',
+        path: config.path,
+        model: config.model,
+        model_provider: config.model_provider,
+        provider_name: config.provider_name,
+        default_model: '',
+        models: [],
+        sources: [],
+        message: err instanceof Error ? err.message : '模型列表读取失败',
+      });
+    } finally {
+      setCodexModelsLoading(false);
+    }
+  }
+
+  async function applyModelUnlock() {
+    if (!window.bridgeDesktop?.applyModelUnlock) return;
+    setLoading((current) => ({ ...current, desktop: true }));
+    try {
+      const next = await window.bridgeDesktop.applyModelUnlock();
+      setModelUnlockStatus(next);
+      if (next.injected) {
+        setError('');
+        setNotice('模型白名单解锁已注入。');
+      } else {
+        setError(next.error || next.message || '解锁注入失败');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '解锁注入失败');
+    } finally {
+      setLoading((current) => ({ ...current, desktop: false }));
     }
   }
 
@@ -765,11 +843,48 @@ function App() {
                   </StatusGrid>
                 </Card>
 
-                <Card title="模型服务" subtitle="只编辑常用模型和 provider 字段，认证信息仍留在 Codex 自己的 auth 文件中。">
+                <Card title="模型解锁与模型服务" subtitle="注入只补模型白名单，不再修改插件或技能入口。">
+                  <StatusGrid compact>
+                    <Metric
+                      icon={<KeyRound size={17} />}
+                      label="注入状态"
+                      value={modelUnlockStatus?.injected ? '已注入' : modelUnlockStatus?.available === false ? '不可用' : '未注入'}
+                      detail={modelUnlockStatus?.message || '等待检测 Codex 桌面端'}
+                    />
+                    <Metric
+                      icon={<Cpu size={17} />}
+                      label="调试端口"
+                      value={String(modelUnlockStatus?.debugPort || 9229)}
+                      detail={modelUnlockStatus?.targetTitle || modelUnlockStatus?.targetUrl || '127.0.0.1'}
+                    />
+                  </StatusGrid>
+                  {modelUnlockStatus?.error && <span className="empty-note">{modelUnlockStatus.error}</span>}
+                  <div className="update-row">
+                    <span>模型列表会从当前接口地址读取 /v1/models。</span>
+                    <div className="inline-actions">
+                      <button className="icon-text" type="button" disabled={loading.desktop} onClick={() => void loadModelUnlockStatus()}>
+                        <RefreshCw size={15} />
+                        检测注入
+                      </button>
+                      <button className="primary icon-text" type="button" disabled={loading.desktop || modelUnlockStatus?.available === false} onClick={() => void applyModelUnlock()}>
+                        {loading.desktop ? <Loader2 className="spin" size={15} /> : <KeyRound size={15} />}
+                        启动并注入模型
+                      </button>
+                    </div>
+                  </div>
                   <div className="config-grid">
                     <label className="field">
                       <span>模型</span>
-                      <input value={codexDraft.model} onChange={(event) => updateCodexDraft({ model: event.target.value })} placeholder="gpt-5.2" />
+                      {codexDraft.base_url.trim() ? (
+                        <select value={codexDraft.model} onChange={(event) => updateCodexDraft({ model: event.target.value })}>
+                          <option value="">{codexModelsLoading ? '正在读取模型...' : '选择模型'}</option>
+                          {modelOptions(codexDraft, codexModelCatalog).map((model) => (
+                            <option value={model} key={model}>{model}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input value={codexDraft.model} onChange={(event) => updateCodexDraft({ model: event.target.value })} placeholder="mimo-v2-pro" />
+                      )}
                     </label>
                     <label className="field">
                       <span>模型服务</span>
@@ -778,8 +893,17 @@ function App() {
                   </div>
                   <label className="field">
                     <span>接口地址</span>
-                    <input value={codexDraft.base_url} onChange={(event) => updateCodexDraft({ base_url: event.target.value })} placeholder="https://api.openai.com/v1" />
+                    <input value={codexDraft.base_url} onChange={(event) => updateCodexDraft({ base_url: event.target.value })} placeholder="https://your-relay.example/v1" />
                   </label>
+                  {codexDraft.base_url.trim() && (
+                    <div className="update-row">
+                      <span>{modelCatalogText(codexModelCatalog, codexModelsLoading)}</span>
+                      <button className="icon-text" type="button" disabled={codexModelsLoading} onClick={() => void loadCodexModelCatalog()}>
+                        {codexModelsLoading ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                        刷新模型
+                      </button>
+                    </div>
+                  )}
                   <label className="field">
                     <span>API Key</span>
                     <input
@@ -805,8 +929,8 @@ function App() {
                     </label>
                   </div>
                   <ToggleRow
-                    title="使用 OpenAI 登录鉴权"
-                    detail="写入 provider 的 requires_openai_auth。"
+                    title="使用 Bearer 鉴权"
+                    detail="有 API Key 时自动写入 requires_openai_auth，让 Codex 请求携带 Authorization Bearer。"
                     checked={codexDraft.requires_openai_auth}
                     onChange={(checked) => updateCodexDraft({ requires_openai_auth: checked })}
                   />
@@ -1073,6 +1197,18 @@ function relayConfigChanged(
   );
 }
 
+function modelOptions(config: CodexConfig, catalog: CodexModelCatalog | null) {
+  return Array.from(new Set([config.model.trim(), ...(catalog?.models || [])].filter(Boolean)));
+}
+
+function modelCatalogText(catalog: CodexModelCatalog | null, loading: boolean) {
+  if (loading) return '正在从中转站读取 /v1/models';
+  if (!catalog) return '填写接口地址后会从中转站读取 /v1/models';
+  if (catalog.models.length > 0) return `已读取 ${catalog.models.length} 个模型`;
+  if (catalog.message) return `模型列表读取失败：${catalog.message}`;
+  return '没有读取到模型，可清空接口地址后手动输入';
+}
+
 function normalizeCodexConfigDraft(config: CodexConfig): CodexConfig {
   const projects = config.projects
     .map((project) => ({ path: project.path.trim(), trust_level: project.trust_level.trim() }))
@@ -1089,6 +1225,7 @@ function normalizeCodexConfigDraft(config: CodexConfig): CodexConfig {
     history_persistence: config.history_persistence.trim(),
     base_url: config.base_url.trim(),
     provider_name: config.provider_name.trim(),
+    requires_openai_auth: Boolean(config.requires_openai_auth || (config.api_key?.trim() && config.base_url.trim())),
     wire_api: config.wire_api.trim(),
     api_key: config.api_key?.trim() || '',
     projects,

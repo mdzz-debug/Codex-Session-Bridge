@@ -115,12 +115,15 @@ func readCodexConfig() (CodexConfig, *tomlDoc, error) {
 	cfg.ProviderName = doc.stringValue(providerSection, "name")
 	cfg.RequiresOpenAIAuth = doc.boolValue(providerSection, "requires_openai_auth")
 	cfg.WireAPI = doc.stringValue(providerSection, "wire_api")
+	cfg.APIKey = doc.stringValue(providerSection, "experimental_bearer_token")
 	apiKey, err := readCodexAPIKey()
 	if err != nil {
 		cfg.Warnings = append(cfg.Warnings, "读取 auth.json 失败: "+err.Error())
 	} else if apiKey != "" {
 		cfg.APIKeyConfigured = true
 		cfg.APIKey = apiKey
+	} else if cfg.APIKey != "" {
+		cfg.APIKeyConfigured = true
 	}
 	cfg.NetworkAccess = doc.boolValue("sandbox_workspace_write", "network_access")
 	cfg.Projects = doc.projects()

@@ -134,6 +134,30 @@ export interface CodexConfig {
   warnings?: string[];
 }
 
+export interface CodexModelSource {
+  id: string;
+  type: string;
+  name: string;
+  base_url: string;
+  endpoint: string;
+  auth: string;
+  status: string;
+  models: number;
+  message?: string;
+}
+
+export interface CodexModelCatalog {
+  status: string;
+  path: string;
+  model: string;
+  model_provider: string;
+  provider_name: string;
+  default_model: string;
+  models: string[];
+  sources: CodexModelSource[];
+  message?: string;
+}
+
 export interface CodexRestartResult {
   restarted: boolean;
 }
@@ -181,6 +205,11 @@ export const bridgeApi = {
   device: (settings: BridgeSettings) => request<DeviceInfo>(daemonUrl(settings, '/v1/device')),
   relayStatus: (settings: BridgeSettings) => request<RelayRuntimeStatus>(daemonUrl(settings, '/v1/relay/status')),
   codexConfig: (settings: BridgeSettings) => request<CodexConfig>(daemonUrl(settings, '/v1/codex/config')),
+  codexModelCatalog: (settings: BridgeSettings, config: CodexConfig) =>
+    request<CodexModelCatalog>(daemonUrl(settings, '/v1/codex/model-catalog'), {
+      method: 'POST',
+      body: JSON.stringify(config),
+    }),
   updateCodexConfig: (settings: BridgeSettings, config: CodexConfig) =>
     request<CodexConfig>(daemonUrl(settings, '/v1/codex/config'), {
       method: 'PUT',

@@ -368,6 +368,13 @@ button:disabled,
   border-top: 1px solid var(--line);
 }
 
+.inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .update-row > span {
   flex: 1;
   min-width: 0;

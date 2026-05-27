@@ -74,6 +74,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/relay/config", s.handleRelayConfig)
 	mux.HandleFunc("GET /v1/codex/config", s.handleCodexConfigRead)
 	mux.HandleFunc("PUT /v1/codex/config", s.handleCodexConfigWrite)
+	mux.HandleFunc("GET /v1/codex/model-catalog", s.handleCodexModelCatalog)
+	mux.HandleFunc("POST /v1/codex/model-catalog", s.handleCodexModelCatalogPreview)
 	mux.HandleFunc("POST /v1/codex/restart", s.handleCodexRestart)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/threads", s.handleThreadStart)
@@ -127,6 +129,18 @@ func (s *Server) handleCodexConfigWrite(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, next)
+}
+
+func (s *Server) handleCodexModelCatalog(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, readCodexModelCatalog())
+}
+
+func (s *Server) handleCodexModelCatalogPreview(w http.ResponseWriter, r *http.Request) {
+	var cfg CodexConfig
+	if !decodeJSON(w, r, &cfg) {
+		return
+	}
+	writeJSON(w, http.StatusOK, readCodexModelCatalogFromConfig(cfg))
 }
 
 func (s *Server) handleCodexRestart(w http.ResponseWriter, r *http.Request) {

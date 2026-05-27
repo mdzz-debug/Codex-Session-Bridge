@@ -17,4 +17,6 @@ contextBridge.exposeInMainWorld('bridgeDesktop', {
   openPrivacySettings: () => ipcRenderer.invoke('desktop:open-privacy-settings'),
   chooseProjectFolder: () => ipcRenderer.invoke('desktop:choose-project-folder'),
   restartCodexDesktopIfRunning: () => ipcRenderer.invoke('desktop:restart-codex-desktop-if-running'),
+  getModelUnlockStatus: () => ipcRenderer.invoke('desktop:get-model-unlock-status'),
+  applyModelUnlock: () => ipcRenderer.invoke('desktop:apply-model-unlock'),
 });

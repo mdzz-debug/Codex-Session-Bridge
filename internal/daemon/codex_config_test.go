@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,5 +243,43 @@ func TestCodexConfigReadsAndWritesAPIKey(t *testing.T) {
 	}
 	if apiKey != "sk-new5678" {
 		t.Fatalf("unexpected written API key %q", apiKey)
+	}
+}
+
+func TestReadCodexModelCatalogFetchesProviderModels(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Fatalf("unexpected auth header: %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"relay-a"},{"id":"relay-b"}]}`))
+	}))
+	defer upstream.Close()
+	raw := `model = "relay-a"
+model_provider = "relay"
+
+[model_providers.relay]
+base_url = "` + upstream.URL + `/v1"
+name = "Relay"
+wire_api = "responses"
+`
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(`{"OPENAI_API_KEY":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog := readCodexModelCatalog()
+	if catalog.Status != "ok" || catalog.DefaultModel != "relay-a" || len(catalog.Models) != 2 {
+		t.Fatalf("unexpected catalog: %#v", catalog)
+	}
+	if catalog.Models[0] != "relay-a" || catalog.Models[1] != "relay-b" {
+		t.Fatalf("unexpected models: %#v", catalog.Models)
 	}
 }
