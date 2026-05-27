@@ -103,8 +103,7 @@ fi
 if [[ "$BUILD_WIN" == "true" ]]; then
   npm run build:injector -- win
   if [[ ! -f dist/bin/csb-injector.exe ]]; then
-    echo "Missing required packaged Rust injector: dist/bin/csb-injector.exe" >&2
-    exit 1
+    echo "Optional Windows Rust injector was not built; packaged app will use the JavaScript CDP injector fallback."
   fi
 fi
 

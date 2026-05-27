@@ -15,6 +15,30 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 127
 fi
 
+ensure_rust_target() {
+  local triple="$1"
+  if rustup target list --installed 2>/dev/null | grep -Fxq "$triple"; then
+    return
+  fi
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "Rust target is not installed: $triple" >&2
+    echo "Install it first: rustup target add $triple" >&2
+    exit 1
+  fi
+  echo "==> Installing missing Rust target: $triple"
+  rustup target add "$triple"
+}
+
+should_skip_target_build() {
+  local triple="$1"
+  if [[ "$triple" == *-pc-windows-msvc ]] && ! command -v link.exe >/dev/null 2>&1; then
+    echo "Skipping optional Rust injector for $triple: MSVC linker link.exe was not found." >&2
+    echo "Windows packages will use the built-in JavaScript CDP injector fallback." >&2
+    return 0
+  fi
+  return 1
+}
+
 mkdir -p dist/bin
 
 copy_checked() {
@@ -43,6 +67,10 @@ build_native() {
 build_target() {
   local triple="$1"
   local suffix="$2"
+  if should_skip_target_build "$triple"; then
+    return
+  fi
+  ensure_rust_target "$triple"
   cargo build --release --manifest-path rust/csb-injector/Cargo.toml --target "$triple"
   copy_checked "rust/csb-injector/target/${triple}/release/csb-injector${suffix}" "dist/bin/csb-injector${suffix}"
 }
