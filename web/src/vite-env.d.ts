@@ -85,7 +85,5 @@ interface Window {
     getModelUnlockStatus: () => Promise<BridgeDesktopModelUnlockStatus>;
     applyModelUnlock: () => Promise<BridgeDesktopModelUnlockStatus>;
     resizeWindow: (height: number) => Promise<boolean>;
-    /** Run a shell command (npx / binary) from the main process. */
-    runCommand: (command: string, args?: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
   };
 }

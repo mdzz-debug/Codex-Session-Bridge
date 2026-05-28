@@ -1,5 +1,5 @@
 export type ThemeName = 'system' | 'light' | 'dark';
-export type SettingsSection = 'general' | 'relay' | 'codex' | 'projects' | 'skills' | 'about';
+export type SettingsSection = 'general' | 'relay' | 'codex' | 'about';
 
 export interface BridgeSettings {
   daemonBase: string;
@@ -91,7 +91,7 @@ export function readDesktopSection(): SettingsSection {
   try {
     const value = localStorage.getItem(SECTION_KEY);
     if (value === 'appearance') return 'about';
-    return value === 'relay' || value === 'codex' || value === 'projects' || value === 'skills' || value === 'about' ? value : 'general';
+    return value === 'relay' || value === 'codex' || value === 'about' ? value : 'general';
   } catch {
     return 'general';
   }
