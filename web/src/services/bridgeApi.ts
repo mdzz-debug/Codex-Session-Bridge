@@ -1,4 +1,5 @@
 import type { BridgeSettings, RelaySession } from './storage';
+import type { SkillInstallResult, SkillListResponse, SkillRunResult } from './skillRegistry';
 
 export interface DeviceInfo {
   device_id: string;
@@ -257,6 +258,28 @@ export const bridgeApi = {
     request<Record<string, unknown>>(daemonUrl(settings, `/v1/threads/${encodeURIComponent(threadId)}/interrupt`), {
       method: 'POST',
       body: JSON.stringify({ turn_id: turnId }),
+    }),
+
+  // --- Skills ---
+  skillList: (settings: BridgeSettings) =>
+    request<SkillListResponse>(daemonUrl(settings, '/v1/skills')),
+
+  skillInstall: (settings: BridgeSettings, skillId: string) =>
+    request<SkillInstallResult>(daemonUrl(settings, '/v1/skills/install'), {
+      method: 'POST',
+      body: JSON.stringify({ skillId }),
+    }),
+
+  skillUpgrade: (settings: BridgeSettings, skillId: string) =>
+    request<SkillInstallResult>(daemonUrl(settings, '/v1/skills/upgrade'), {
+      method: 'POST',
+      body: JSON.stringify({ skillId }),
+    }),
+
+  skillRun: (settings: BridgeSettings, skillId: string, command: string, args?: string[], dir?: string) =>
+    request<SkillRunResult>(daemonUrl(settings, '/v1/skills/run'), {
+      method: 'POST',
+      body: JSON.stringify({ skillId, command, args, dir }),
     }),
 };
 

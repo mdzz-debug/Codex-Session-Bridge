@@ -1902,6 +1902,29 @@ async function applyModelUnlock() {
   }
 }
 
+
+function runCommand(command, args = [], options = {}) {
+  return new Promise((resolve) => {
+    const timeout = typeof options.timeout === 'number' ? options.timeout : 120000;
+    const child = spawn(command, args, {
+      cwd: options.cwd || undefined,
+      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+      shell: true,
+      timeout,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('close', (code) => {
+      resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+    child.on('error', (err) => {
+      resolve({ code: 1, stdout: stdout.trim(), stderr: err.message });
+    });
+  });
+}
+
 app.whenReady().then(async () => {
   readDesktopPreferences();
   ipcMain.handle('desktop:get-preferences', () => publicDesktopPreferences());
@@ -1966,6 +1989,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('desktop:apply-model-unlock', () => applyModelUnlock());
   ipcMain.handle('desktop:get-plugin-unlock-status', () => getModelUnlockStatus());
   ipcMain.handle('desktop:apply-plugin-unlock', () => applyModelUnlock());
+  ipcMain.handle('desktop:run-command', async (_event, command, args = [], options = {}) => {
+    return runCommand(command, args, options);
+  });
   startDaemon();
   createWindow();
   createTray();
