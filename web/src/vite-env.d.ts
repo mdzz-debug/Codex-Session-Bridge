@@ -9,6 +9,28 @@ interface BridgeDesktopPreferences {
   hideDockIcon: boolean;
   daemonPort: string;
   daemonUrl?: string;
+  usageWidget: BridgeDesktopUsageWidgetPreferences;
+}
+
+interface BridgeDesktopUsageWidgetPreferences {
+  enabled: boolean;
+  backendBaseUrl: string;
+  managementKey: string;
+  updateIntervalMinutes: number;
+}
+
+interface BridgeDesktopUsageWidgetState {
+  ok: boolean;
+  message?: string;
+  planName?: string;
+  quotaMode?: 'daily' | 'total';
+  todayUsed?: number;
+  used?: number;
+  limit?: number | null;
+  remaining?: number | null;
+  percent?: number;
+  endsAt?: string;
+  updatedAt?: string;
 }
 
 interface BridgeDesktopDaemonStatus {
@@ -84,6 +106,9 @@ interface Window {
     restartCodexDesktopIfRunning: () => Promise<BridgeDesktopCodexRestartStatus>;
     getModelUnlockStatus: () => Promise<BridgeDesktopModelUnlockStatus>;
     applyModelUnlock: () => Promise<BridgeDesktopModelUnlockStatus>;
+    showUsageWidget: () => Promise<{ available: boolean; state?: BridgeDesktopUsageWidgetState; preferences?: BridgeDesktopPreferences }>;
+    hideUsageWidget: () => Promise<BridgeDesktopPreferences>;
+    refreshUsageWidget: () => Promise<BridgeDesktopUsageWidgetState | null>;
     resizeWindow: (height: number) => Promise<boolean>;
   };
 }

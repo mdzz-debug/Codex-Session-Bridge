@@ -5,6 +5,7 @@ import {
   Circle,
   Download,
   FolderOpen,
+  Gauge,
   KeyRound,
   Laptop,
   Loader2,
@@ -57,6 +58,14 @@ interface DesktopPreferences {
   hideDockIcon: boolean;
   daemonPort: string;
   daemonUrl?: string;
+  usageWidget: DesktopUsageWidgetPreferences;
+}
+
+interface DesktopUsageWidgetPreferences {
+  enabled: boolean;
+  backendBaseUrl: string;
+  managementKey: string;
+  updateIntervalMinutes: number;
 }
 
 interface DaemonDesktopStatus {
@@ -90,6 +99,12 @@ const fallbackDesktopPrefs: DesktopPreferences = {
   hideDockIcon: false,
   daemonPort: '8787',
   daemonUrl: 'http://127.0.0.1:8787',
+  usageWidget: {
+    enabled: false,
+    backendBaseUrl: 'http://127.0.0.1:8317',
+    managementKey: '',
+    updateIntervalMinutes: 3,
+  },
 };
 
 function App() {
@@ -108,6 +123,8 @@ function App() {
   const [desktopPrefs, setDesktopPrefs] = useState<DesktopPreferences>(fallbackDesktopPrefs);
   const [daemonDesktop, setDaemonDesktop] = useState<DaemonDesktopStatus | null>(null);
   const [daemonPortDraft, setDaemonPortDraft] = useState(fallbackDesktopPrefs.daemonPort);
+  const [usageWidgetDraft, setUsageWidgetDraft] = useState(fallbackDesktopPrefs.usageWidget);
+  const [usageWidgetStatus, setUsageWidgetStatus] = useState<BridgeDesktopUsageWidgetState | null>(null);
   const [appInfo, setAppInfo] = useState<DesktopAppInfo | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [codexConfig, setCodexConfig] = useState<CodexConfig | null>(null);
@@ -234,7 +251,12 @@ function App() {
     relayRuntime?.state,
     relayRuntime?.last_error,
     desktopPrefs.hideDockIcon,
+    desktopPrefs.usageWidget?.enabled,
     daemonPortDraft,
+    usageWidgetDraft.backendBaseUrl,
+    usageWidgetDraft.updateIntervalMinutes,
+    usageWidgetStatus?.message,
+    usageWidgetStatus?.updatedAt,
     updateInfo?.latestVersion,
     codexDraft?.path,
     codexDraft?.projects.length,
@@ -298,10 +320,13 @@ function App() {
     if (!window.bridgeDesktop?.getPreferences) return;
     try {
       const next = await window.bridgeDesktop.getPreferences();
-      setDesktopPrefs(next);
+      const normalized = normalizeDesktopPreferences(next);
+      setDesktopPrefs(normalized);
+      setUsageWidgetDraft(normalized.usageWidget);
       setDaemonPortDraft(next.daemonPort || '8787');
     } catch {
       setDesktopPrefs(fallbackDesktopPrefs);
+      setUsageWidgetDraft(fallbackDesktopPrefs.usageWidget);
     }
   }
 
@@ -386,12 +411,14 @@ function App() {
   }
 
   async function updateDesktopPreferences(patch: Partial<DesktopPreferences>) {
-    const next = { ...desktopPrefs, ...patch };
+    const next = normalizeDesktopPreferences({ ...desktopPrefs, ...patch });
     setDesktopPrefs(next);
     if (!window.bridgeDesktop?.setPreferences) return;
     setLoading((current) => ({ ...current, desktop: true }));
     try {
-      setDesktopPrefs(await window.bridgeDesktop.setPreferences(patch));
+      const saved = normalizeDesktopPreferences(await window.bridgeDesktop.setPreferences(patch));
+      setDesktopPrefs(saved);
+      setUsageWidgetDraft(saved.usageWidget);
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存桌面设置失败');
@@ -419,6 +446,63 @@ function App() {
       void loadDaemonDesktopStatus();
       void bootstrap();
     }, 900);
+  }
+
+  async function updateUsageWidgetEnabled(enabled: boolean) {
+    if (enabled && !session) {
+      setError('请先登录中转站账号，再开启用量小组件');
+      return;
+    }
+    const next = normalizeUsageWidgetPreferences({ ...desktopPrefs.usageWidget, enabled });
+    setUsageWidgetDraft(next);
+    await updateDesktopPreferences({ usageWidget: next });
+    if (!window.bridgeDesktop) return;
+    try {
+      if (enabled) {
+        const result = await window.bridgeDesktop.showUsageWidget?.();
+        if (result?.preferences) {
+          const prefs = normalizeDesktopPreferences(result.preferences);
+          setDesktopPrefs(prefs);
+          setUsageWidgetDraft(prefs.usageWidget);
+        }
+        if (result?.state) setUsageWidgetStatus(result.state);
+      } else {
+        const prefs = await window.bridgeDesktop.hideUsageWidget?.();
+        if (prefs) {
+          const normalized = normalizeDesktopPreferences(prefs);
+          setDesktopPrefs(normalized);
+          setUsageWidgetDraft(normalized.usageWidget);
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '小组件操作失败');
+    }
+  }
+
+  async function applyUsageWidgetPreferences() {
+    const next = normalizeUsageWidgetPreferences(usageWidgetDraft);
+    if (!session && next.enabled) {
+      setError('请先登录中转站账号，再开启用量小组件');
+      return;
+    }
+    setUsageWidgetDraft(next);
+    await updateDesktopPreferences({ usageWidget: next });
+    setNotice('小组件设置已保存');
+    if (next.enabled) void refreshUsageWidget();
+  }
+
+  async function refreshUsageWidget() {
+    if (!window.bridgeDesktop?.refreshUsageWidget) return;
+    setLoading((current) => ({ ...current, desktop: true }));
+    try {
+      const state = await window.bridgeDesktop.refreshUsageWidget();
+      if (state) setUsageWidgetStatus(state);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '刷新小组件失败');
+    } finally {
+      setLoading((current) => ({ ...current, desktop: false }));
+    }
   }
 
   async function checkUpdates() {
@@ -749,6 +833,56 @@ function App() {
                 />
               )}
             </Card>
+
+            {desktopPrefs.platform === 'darwin' && (
+              <Card title="用量小组件" subtitle="mac 浮动小窗会按间隔读取 CLIProxyAPI 订阅用量。">
+                <ToggleRow
+                  title="显示桌面小组件"
+                  detail="显示今日用量和剩余额度，可从菜单栏再次打开或隐藏。"
+                  checked={desktopPrefs.usageWidget.enabled}
+                  disabled={loading.desktop}
+                  onChange={(checked) => void updateUsageWidgetEnabled(checked)}
+                />
+                <div className="usage-widget-fields">
+                  <label className="field">
+                    <span>更新频率（分钟）</span>
+                    <input
+                      value={String(usageWidgetDraft.updateIntervalMinutes)}
+                      inputMode="numeric"
+                      min={3}
+                      onChange={(event) => {
+                        const raw = event.target.value.replace(/[^\d]/g, '').slice(0, 4);
+                        setUsageWidgetDraft((current) => ({
+                          ...current,
+                          updateIntervalMinutes: raw ? Math.max(3, Number(raw)) : 3,
+                        }));
+                      }}
+                    />
+                  </label>
+                </div>
+                <div className="usage-widget-actions">
+                  <button type="button" disabled={loading.desktop} onClick={() => void applyUsageWidgetPreferences()}>
+                    保存设置
+                  </button>
+                  <button className="icon-text" type="button" disabled={loading.desktop || !desktopPrefs.usageWidget.enabled} onClick={() => void refreshUsageWidget()}>
+                    <Gauge size={15} />
+                    刷新
+                  </button>
+                </div>
+                <Metric
+                  icon={<Gauge size={17} />}
+                  label="数据源"
+                  value={session ? session.username : '未登录'}
+                  detail={session?.apiBase || '登录中转站账号后自动读取用量'}
+                />
+                <Metric
+                  icon={<Gauge size={17} />}
+                  label="小组件"
+                  value={usageWidgetStatus?.ok ? '已更新' : desktopPrefs.usageWidget.enabled ? '等待数据' : '未显示'}
+                  detail={usageWidgetStatus?.message || (usageWidgetStatus?.updatedAt ? `最后更新 ${formatTime(usageWidgetStatus.updatedAt)}` : '最短更新间隔 3 分钟')}
+                />
+              </Card>
+            )}
 
             <Card title="文件访问权限" subtitle="Codex 读取项目时由系统权限控制，桌面端只提供授权入口。">
               <div className="permission-actions">
@@ -1153,6 +1287,45 @@ function formatTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleTimeString();
+}
+
+function normalizeUsageWidgetIntervalMinutes(value: number | string | undefined) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) return 3;
+  return Math.max(3, Math.min(1440, Math.round(minutes)));
+}
+
+function normalizeManagementBaseUrl(value: string | undefined) {
+  const raw = String(value || '').trim() || 'http://127.0.0.1:8317';
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    url.pathname = url.pathname.replace(/\/+$/g, '');
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/g, '');
+  } catch {
+    return 'http://127.0.0.1:8317';
+  }
+}
+
+function normalizeUsageWidgetPreferences(value?: Partial<DesktopUsageWidgetPreferences>) {
+  return {
+    ...fallbackDesktopPrefs.usageWidget,
+    ...value,
+    backendBaseUrl: normalizeManagementBaseUrl(value?.backendBaseUrl),
+    managementKey: String(value?.managementKey || '').trim(),
+    updateIntervalMinutes: normalizeUsageWidgetIntervalMinutes(value?.updateIntervalMinutes),
+    enabled: Boolean(value?.enabled),
+  };
+}
+
+function normalizeDesktopPreferences(value: Partial<DesktopPreferences>): DesktopPreferences {
+  return {
+    ...fallbackDesktopPrefs,
+    ...value,
+    usageWidget: normalizeUsageWidgetPreferences(value.usageWidget),
+  };
 }
 
 function normalizePort(value: string) {

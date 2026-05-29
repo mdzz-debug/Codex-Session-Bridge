@@ -19,4 +19,7 @@ contextBridge.exposeInMainWorld('bridgeDesktop', {
   restartCodexDesktopIfRunning: () => ipcRenderer.invoke('desktop:restart-codex-desktop-if-running'),
   getModelUnlockStatus: () => ipcRenderer.invoke('desktop:get-model-unlock-status'),
   applyModelUnlock: () => ipcRenderer.invoke('desktop:apply-model-unlock'),
+  showUsageWidget: () => ipcRenderer.invoke('desktop:show-usage-widget'),
+  hideUsageWidget: () => ipcRenderer.invoke('desktop:hide-usage-widget'),
+  refreshUsageWidget: () => ipcRenderer.invoke('desktop:refresh-usage-widget'),
 });

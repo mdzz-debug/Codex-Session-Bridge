@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, dialog, screen } = require('electron');
 const { execFile, spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -44,7 +44,16 @@ let desktopPreferences = {
   closeToTray: true,
   hideDockIcon: false,
   daemonPort: defaultDaemonPort,
+  usageWidget: {
+    enabled: false,
+    backendBaseUrl: 'http://127.0.0.1:8317',
+    managementKey: '',
+    updateIntervalMinutes: 3,
+  },
 };
+let usageWidgetWindow;
+let usageWidgetTimer;
+let usageWidgetRefreshing = false;
 
 function normalizeDebugPort(value) {
   const port = Number(String(value || '').trim());
@@ -55,6 +64,36 @@ function normalizeDaemonPort(value) {
   const port = String(value || '').trim();
   const numeric = Number(port);
   return Number.isInteger(numeric) && numeric >= 1024 && numeric <= 65535 ? port : defaultDaemonPort;
+}
+
+function normalizeUsageWidgetIntervalMinutes(value) {
+  const minutes = Number(String(value || '').trim());
+  if (!Number.isFinite(minutes)) return 3;
+  return Math.max(3, Math.min(1440, Math.round(minutes)));
+}
+
+function normalizeManagementBaseUrl(value) {
+  const raw = String(value || '').trim() || 'http://127.0.0.1:8317';
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    url.pathname = url.pathname.replace(/\/+$/g, '');
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/+$/g, '');
+  } catch {
+    return 'http://127.0.0.1:8317';
+  }
+}
+
+function normalizeUsageWidgetPreferences(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    enabled: Boolean(source.enabled),
+    backendBaseUrl: normalizeManagementBaseUrl(source.backendBaseUrl),
+    managementKey: typeof source.managementKey === 'string' ? source.managementKey.trim() : '',
+    updateIntervalMinutes: normalizeUsageWidgetIntervalMinutes(source.updateIntervalMinutes),
+  };
 }
 
 function daemonPort() {
@@ -124,6 +163,7 @@ function readDesktopPreferences() {
       closeToTray: parsed.closeToTray !== false,
       hideDockIcon: Boolean(parsed.hideDockIcon),
       daemonPort: normalizeDaemonPort(parsed.daemonPort),
+      usageWidget: normalizeUsageWidgetPreferences(parsed.usageWidget),
     };
   } catch {
     desktopPreferences.launchAtLogin = app.getLoginItemSettings().openAtLogin;
@@ -133,7 +173,7 @@ function readDesktopPreferences() {
 
 function writeDesktopPreferences() {
   fs.mkdirSync(app.getPath('userData'), { recursive: true });
-  fs.writeFileSync(preferencesPath(), JSON.stringify(desktopPreferences, null, 2));
+  fs.writeFileSync(preferencesPath(), JSON.stringify(desktopPreferences, null, 2), { mode: 0o600 });
 }
 
 function publicDesktopPreferences() {
@@ -142,6 +182,10 @@ function publicDesktopPreferences() {
     platform: process.platform,
     version: app.getVersion(),
     ...desktopPreferences,
+    usageWidget: {
+      ...desktopPreferences.usageWidget,
+      managementKey: '',
+    },
     daemonUrl: daemonUrl(),
   };
 }
@@ -155,6 +199,7 @@ function applyDesktopPreferences() {
       app.dock.show();
     }
   }
+  syncUsageWidgetState();
 }
 
 function daemonCommand() {
@@ -302,6 +347,315 @@ function refreshTrayRelayStatus() {
     req.destroy();
     trayStatusRefreshing = false;
   });
+}
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]);
+}
+
+function requestJSON(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const req = client.request(parsed, {
+      method: options.method || 'GET',
+      headers: {
+        Accept: 'application/json',
+        ...(options.headers || {}),
+      },
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        let data = body;
+        try {
+          data = body ? JSON.parse(body) : null;
+        } catch {
+          // Surface the raw response below when the server does not return JSON.
+        }
+        if ((res.statusCode || 0) >= 400) {
+          const message =
+            data && typeof data === 'object' && typeof data.error === 'string'
+              ? data.error
+              : data && typeof data === 'object' && typeof data.message === 'string'
+                ? data.message
+                : body || `HTTP ${res.statusCode}`;
+          reject(new Error(message));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(options.timeoutMs || 7000, () => req.destroy(new Error('请求用量接口超时')));
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
+function usageWidgetAuthHeaders() {
+  const relayState = readRelayState();
+  const key = relayState.session?.token || desktopPreferences.usageWidget?.managementKey || '';
+  return key
+    ? {
+        Authorization: `Bearer ${key}`,
+        'X-Management-Key': key,
+      }
+    : {};
+}
+
+function usageWidgetEndpoint(pathname) {
+  const relayState = readRelayState();
+  const base = normalizeManagementBaseUrl(relayState.session?.apiBase || desktopPreferences.usageWidget?.backendBaseUrl);
+  return `${base}${pathname}`;
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function money(value) {
+  const number = numberOrNull(value);
+  if (number === null) return '-';
+  const formatted =
+    Math.abs(number) >= 100
+      ? number.toFixed(1)
+      : Math.abs(number) >= 10
+        ? number.toFixed(2)
+        : number.toFixed(3).replace(/0+$/g, '').replace(/\.$/g, '');
+  return `$${formatted}`;
+}
+
+function moneyHTML(value) {
+  return escapeHTML(value || '');
+}
+
+function buildUsageWidgetState(subscription) {
+  const quotaMode = String(subscription?.quotaMode || '').toLowerCase();
+  const dailyUsed = numberOrNull(subscription?.dailyUsed) || 0;
+  const totalUsed = numberOrNull(subscription?.totalUsed) || 0;
+  const dailyQuota = numberOrNull(subscription?.dailyQuota);
+  const totalQuota = numberOrNull(subscription?.totalQuota);
+  const limitedByTotal = quotaMode === 'total' || (dailyQuota === null && totalQuota !== null);
+  const used = limitedByTotal ? totalUsed : dailyUsed;
+  const limit = limitedByTotal ? totalQuota : dailyQuota;
+  const remaining = limit === null ? null : Math.max(0, limit - used);
+  const percent = limit && limit > 0 ? Math.max(0, Math.min(100, (used / limit) * 100)) : 0;
+  return {
+    ok: true,
+    planName: subscription?.planName || '订阅卡',
+    quotaMode: limitedByTotal ? 'total' : 'daily',
+    todayUsed: dailyUsed,
+    used,
+    limit,
+    remaining,
+    percent,
+    endsAt: subscription?.endsAt || '',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchUsageWidgetState() {
+  const prefs = desktopPreferences.usageWidget || {};
+  const relayState = readRelayState();
+  if (!relayState.session?.token && !prefs.managementKey) {
+    return {
+      ok: false,
+      message: '请先登录中转站账号',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  try {
+    const subscription = await requestJSON(usageWidgetEndpoint('/v0/management/subscription/me'), {
+      headers: usageWidgetAuthHeaders(),
+      timeoutMs: 7000,
+    });
+    return buildUsageWidgetState(subscription);
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : '用量接口请求失败',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
+function usageWidgetHTML(state) {
+  const updated = state.updatedAt ? new Date(state.updatedAt) : new Date();
+  const updatedText = Number.isNaN(updated.getTime())
+    ? ''
+    : updated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  const percent = Number.isFinite(state.percent) ? state.percent : 0;
+  const remaining = state.remaining === null || state.remaining === undefined ? '不限' : money(state.remaining);
+  const used = state.quotaMode === 'total' ? money(state.used) : money(state.todayUsed ?? state.used);
+  const limit = state.limit === null || state.limit === undefined ? '不限' : money(state.limit);
+  const title = state.ok ? '至纯 Token' : '用量不可用';
+  const subtitle = state.ok
+    ? state.quotaMode === 'total' ? '总额度进度' : '每日用量进度'
+    : escapeHTML(state.message || '无法读取 CLIProxyAPI');
+  return `<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex Usage Widget</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: transparent;
+    color: #182235;
+    font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+  }
+  .widget {
+    width: 100vw;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    gap: 4px;
+    padding: 16px 14px 12px;
+    border: 1px solid rgba(94, 108, 130, 0.12);
+    border-radius: 18px;
+    background: rgba(239, 242, 252, 0.94);
+    box-shadow: 0 16px 34px rgba(76, 94, 128, 0.16);
+    backdrop-filter: blur(30px) saturate(1.35);
+    -webkit-app-region: drag;
+  }
+  .top { display: flex; align-items: start; justify-content: space-between; gap: 10px; min-width: 0; }
+  .title { min-width: 0; }
+  .title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.08; font-weight: 820; }
+  .title span { display: block; margin-top: 6px; color: #516075; font-size: 11px; line-height: 1.15; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+  .badge { min-width: 54px; height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 12px; border-radius: 999px; background: rgba(39, 145, 103, 0.11); color: #27835d; font-size: 16px; font-weight: 820; }
+  .bolt { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border-radius: 11px; background: #c9f4e5; color: #238365; }
+  .bolt svg { width: 15px; height: 15px; display: block; fill: currentColor; }
+  .numbers { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 12px; align-items: end; min-height: 54px; }
+  .number { min-width: 0; }
+  .number.secondary { text-align: right; padding-bottom: 2px; }
+  .number span { display: block; color: #526278; font-size: 10px; font-weight: 760; }
+  .number strong { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1; letter-spacing: 0; font-weight: 820; font-variant-numeric: tabular-nums; }
+  .number.primary strong { font-size: 34px; }
+  .meter { display: grid; gap: 6px; }
+  .bar { height: 7px; overflow: hidden; border-radius: 999px; background: #dbe4f4; }
+  .fill { width: ${percent.toFixed(2)}%; height: 100%; border-radius: inherit; background: #0d8063; box-shadow: 0 0 0 1px rgba(13, 128, 99, 0.04); }
+  .foot { display: flex; justify-content: space-between; gap: 8px; color: #5a6678; font-size: 10px; font-weight: 760; line-height: 1.2; }
+  .error { align-self: center; color: #9b332d; line-height: 1.35; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #eef2ef; }
+    .widget { border-color: rgba(75, 122, 177, 0.14); background: rgba(13, 20, 36, 0.93); box-shadow: 0 16px 34px rgba(0, 0, 0, 0.34); }
+    .title span, .number span, .foot { color: #90a0b8; }
+    .badge { background: rgba(90, 215, 255, 0.14); color: #80dcff; box-shadow: inset 0 0 0 1px rgba(128, 220, 255, 0.16); }
+    .bolt { background: rgba(90, 215, 255, 0.14); color: #80dcff; box-shadow: inset 0 0 0 1px rgba(128, 220, 255, 0.16); }
+    .bar { background: rgba(85, 99, 124, 0.28); }
+    .fill { background: #7fe7ff; box-shadow: 0 0 12px rgba(127, 231, 255, 0.22); }
+    .error { color: #ff9b92; }
+  }
+</style>
+<body>
+  <main class="widget">
+    <div class="top">
+      <div class="title"><strong>${title}</strong><span>${subtitle}</span></div>
+      <div class="actions"><div class="badge">${state.ok ? `${Math.round(percent)}%` : '离线'}</div><div class="bolt"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.4 2.6 6.8 12h4.6l-1 8.8 6.8-10h-4.7l.9-8.2Z"/></svg></div></div>
+    </div>
+    ${
+      state.ok
+        ? `<section class="numbers">
+            <div class="number primary"><span>剩余</span><strong>${moneyHTML(remaining)}</strong></div>
+            <div class="number secondary"><span>已用</span><strong>${moneyHTML(used)}</strong></div>
+          </section>
+          <div class="meter"><div class="bar"><div class="fill"></div></div></div>`
+        : `<div class="error">${escapeHTML(state.message || '无法读取用量')}</div>`
+    }
+    <div class="foot"><span>预算: ${escapeHTML(limit)}</span><span>${escapeHTML(updatedText)}</span></div>
+  </main>
+</body>
+</html>`;
+}
+
+function positionUsageWidgetWindow() {
+  if (!usageWidgetWindow || usageWidgetWindow.isDestroyed()) return;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display.workArea;
+  const [width, height] = usageWidgetWindow.getSize();
+  usageWidgetWindow.setPosition(area.x + area.width - width - 18, area.y + 18, false);
+}
+
+function createUsageWidgetWindow() {
+  if (process.platform !== 'darwin') return null;
+  if (usageWidgetWindow && !usageWidgetWindow.isDestroyed()) return usageWidgetWindow;
+  usageWidgetWindow = new BrowserWindow({
+    width: 306,
+    height: 164,
+    minWidth: 280,
+    minHeight: 150,
+    resizable: false,
+    movable: true,
+    frame: false,
+    transparent: true,
+    show: false,
+    skipTaskbar: true,
+    alwaysOnTop: false,
+    focusable: false,
+    hasShadow: false,
+    title: 'Codex Usage Widget',
+    backgroundColor: '#00000000',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  usageWidgetWindow.setAlwaysOnTop(false);
+  usageWidgetWindow.on('closed', () => {
+    usageWidgetWindow = undefined;
+  });
+  positionUsageWidgetWindow();
+  return usageWidgetWindow;
+}
+
+async function refreshUsageWidget() {
+  if (usageWidgetRefreshing || process.platform !== 'darwin') return null;
+  usageWidgetRefreshing = true;
+  try {
+    const state = await fetchUsageWidgetState();
+    const win = createUsageWidgetWindow();
+    if (!win || win.isDestroyed()) return state;
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(usageWidgetHTML(state))}`);
+    if (desktopPreferences.usageWidget?.enabled && !win.isVisible()) {
+      positionUsageWidgetWindow();
+      win.showInactive();
+    }
+    return state;
+  } finally {
+    usageWidgetRefreshing = false;
+  }
+}
+
+function syncUsageWidgetState() {
+  if (usageWidgetTimer) {
+    clearInterval(usageWidgetTimer);
+    usageWidgetTimer = undefined;
+  }
+  const prefs = desktopPreferences.usageWidget || {};
+  if (process.platform !== 'darwin' || !prefs.enabled) {
+    if (usageWidgetWindow && !usageWidgetWindow.isDestroyed()) usageWidgetWindow.hide();
+    return;
+  }
+  void refreshUsageWidget();
+  usageWidgetTimer = setInterval(() => {
+    void refreshUsageWidget();
+  }, normalizeUsageWidgetIntervalMinutes(prefs.updateIntervalMinutes) * 60 * 1000);
 }
 
 function waitForDaemon(timeoutMs = 12000) {
@@ -481,6 +835,25 @@ function updateTrayMenu(refreshStatus = true) {
       { label: relayLabel, enabled: false },
       { type: 'separator' },
       { label: '打开面板', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
+      {
+        label: desktopPreferences.usageWidget?.enabled ? '隐藏用量小组件' : '显示用量小组件',
+        visible: process.platform === 'darwin',
+        click: () => {
+          desktopPreferences.usageWidget = normalizeUsageWidgetPreferences({
+            ...desktopPreferences.usageWidget,
+            enabled: !desktopPreferences.usageWidget?.enabled,
+          });
+          writeDesktopPreferences();
+          syncUsageWidgetState();
+          updateTrayMenu(false);
+        },
+      },
+      {
+        label: '刷新用量小组件',
+        visible: process.platform === 'darwin',
+        enabled: Boolean(desktopPreferences.usageWidget?.enabled),
+        click: () => { void refreshUsageWidget(); },
+      },
       { label: '启动 daemon', enabled: !daemonProcess, click: () => { daemonStoppedByUser = false; startDaemon(); loadAppWhenDaemonReady(); updateTrayMenu(); } },
       { label: '停止 daemon', enabled: Boolean(daemonProcess), click: () => { stopDaemon(); loadLoadingPage('本地服务已停止'); updateTrayMenu(); } },
       { label: '重启 daemon', click: restartDaemon },
@@ -1914,9 +2287,16 @@ app.whenReady().then(async () => {
       closeToTray: typeof patch.closeToTray === 'boolean' ? patch.closeToTray : desktopPreferences.closeToTray,
       hideDockIcon: typeof patch.hideDockIcon === 'boolean' ? patch.hideDockIcon : desktopPreferences.hideDockIcon,
       daemonPort: patch.daemonPort === undefined ? desktopPreferences.daemonPort : normalizeDaemonPort(patch.daemonPort),
+      usageWidget: patch.usageWidget === undefined
+        ? desktopPreferences.usageWidget
+        : normalizeUsageWidgetPreferences({
+            ...desktopPreferences.usageWidget,
+            ...patch.usageWidget,
+          }),
     };
     applyDesktopPreferences();
     writeDesktopPreferences();
+    updateTrayMenu(false);
     return publicDesktopPreferences();
   });
   ipcMain.handle('desktop:get-daemon-status', () => daemonStatus());
@@ -1966,6 +2346,29 @@ app.whenReady().then(async () => {
   ipcMain.handle('desktop:apply-model-unlock', () => applyModelUnlock());
   ipcMain.handle('desktop:get-plugin-unlock-status', () => getModelUnlockStatus());
   ipcMain.handle('desktop:apply-plugin-unlock', () => applyModelUnlock());
+  ipcMain.handle('desktop:show-usage-widget', async () => {
+    if (process.platform !== 'darwin') return { available: false };
+    desktopPreferences.usageWidget = normalizeUsageWidgetPreferences({
+      ...desktopPreferences.usageWidget,
+      enabled: true,
+    });
+    writeDesktopPreferences();
+    syncUsageWidgetState();
+    updateTrayMenu(false);
+    const state = await refreshUsageWidget();
+    return { available: true, state, preferences: publicDesktopPreferences() };
+  });
+  ipcMain.handle('desktop:hide-usage-widget', () => {
+    desktopPreferences.usageWidget = normalizeUsageWidgetPreferences({
+      ...desktopPreferences.usageWidget,
+      enabled: false,
+    });
+    writeDesktopPreferences();
+    syncUsageWidgetState();
+    updateTrayMenu(false);
+    return publicDesktopPreferences();
+  });
+  ipcMain.handle('desktop:refresh-usage-widget', async () => refreshUsageWidget());
   startDaemon();
   createWindow();
   createTray();
@@ -1981,5 +2384,6 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', () => {
+  if (usageWidgetTimer) clearInterval(usageWidgetTimer);
   stopDaemon();
 });
